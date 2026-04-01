@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+dist/
+
+# Build outputs
+*.js
+!eslint.config.mjs
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma
+prisma/migrations/
+
+# Docker
+Dockerfile
+docker-compose.yml
+
+# Config files
+nest-cli.json
+tsconfig*.json
+jest.config.js

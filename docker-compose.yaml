@@ -1,0 +1,344 @@
+name: lagos-state-waste-management
+
+services:
+  # ============================================================
+  # INFRASTRUCTURE LAYER
+  # ============================================================
+
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: lagos_state_waste_management_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - lagos_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: lagos_state_waste_management_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - lagos_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: lagos_state_waste_management_nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222" # Client connections
+      - "8222:8222" # HTTP monitoring
+    networks:
+      - lagos_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  minio:
+    image: minio/minio:latest
+    container_name: lagos_state_waste_management_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    ports:
+      - "9000:9000" # API
+      - "9001:9001" # Web Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - lagos_network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ============================================================
+  # API GATEWAY — TRAEFIK
+  # ============================================================
+
+  traefik:
+    image: traefik:v3.0
+    container_name: lagos_state_waste_management_traefik
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0"
+      - "--accesslog=true"
+      - "--log.level=INFO"
+    ports:
+      - "80:80" # All service traffic goes through here
+      - "8080:8080" # Traefik dashboard → http://localhost:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  # ============================================================
+  # OBSERVABILITY LAYER
+  # ============================================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: lagos_state_waste_management_prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--storage.tsdb.retention.time=15d"
+    ports:
+      - "9090:9090" # Prometheus UI → http://localhost:9090
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - lagos_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: lagos_state_waste_management_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: lagos_grafana_secret
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    ports:
+      - "3100:3000" # Grafana UI → http://localhost:3100 (3000 reserved for NestJS)
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - lagos_network
+    depends_on:
+      - prometheus
+
+  # ============================================================
+  # APPLICATION SERVICES
+  # ============================================================
+
+  auth-service:
+    build:
+      context: ./backend
+      dockerfile: apps/auth-service/Dockerfile
+    container_name: lagos_state_waste_management_auth_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${AUTH_SERVICE_PORT}" # Only visible inside Docker network
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth.entrypoints=web"
+      - "traefik.http.services.auth.loadbalancer.server.port=${AUTH_SERVICE_PORT}"
+
+  user-service:
+    build:
+      context: ./backend
+      dockerfile: apps/user-service/Dockerfile
+    container_name: lagos_state_waste_management_user_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${USER_SERVICE_PORT}"
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.user.rule=PathPrefix(`/api/users`)"
+      - "traefik.http.routers.user.entrypoints=web"
+      - "traefik.http.services.user.loadbalancer.server.port=${USER_SERVICE_PORT}"
+
+  report-service:
+    build:
+      context: ./backend
+      dockerfile: apps/report-service/Dockerfile
+    container_name: lagos_state_waste_management_report_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${REPORT_SERVICE_PORT}"
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.report.rule=PathPrefix(`/api/reports`)"
+      - "traefik.http.routers.report.entrypoints=web"
+      - "traefik.http.services.report.loadbalancer.server.port=${REPORT_SERVICE_PORT}"
+
+  media-service:
+    build:
+      context: ./backend
+      dockerfile: apps/media-service/Dockerfile
+    container_name: lagos_state_waste_management_media_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${MEDIA_SERVICE_PORT}"
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.media.rule=PathPrefix(`/api/media`)"
+      - "traefik.http.routers.media.entrypoints=web"
+      - "traefik.http.services.media.loadbalancer.server.port=${MEDIA_SERVICE_PORT}"
+
+  notification-service:
+    build:
+      context: ./backend
+      dockerfile: apps/notification-service/Dockerfile
+    container_name: lagos_state_waste_management_notification_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${NOTIFICATION_SERVICE_PORT}"
+    networks:
+      - lagos_network
+    depends_on:
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notification.rule=PathPrefix(`/api/notifications`)"
+      - "traefik.http.routers.notification.entrypoints=web"
+      - "traefik.http.services.notification.loadbalancer.server.port=${NOTIFICATION_SERVICE_PORT}"
+
+  payment-service:
+    build:
+      context: ./backend
+      dockerfile: apps/payment-service/Dockerfile
+    container_name: lagos_state_waste_management_payment_service
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    expose:
+      - "${PAYMENT_SERVICE_PORT}"
+    networks:
+      - lagos_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.payment.rule=PathPrefix(`/api/payments`)"
+      - "traefik.http.routers.payment.entrypoints=web"
+      - "traefik.http.services.payment.loadbalancer.server.port=${PAYMENT_SERVICE_PORT}"
+
+# ============================================================
+# VOLUMES — Persistent data survives container restarts
+# ============================================================
+
+volumes:
+  postgres_data:
+    driver: local
+    name: lagos_postgres_data
+
+  redis_data:
+    driver: local
+    name: lagos_redis_data
+
+  minio_data:
+    driver: local
+    name: lagos_minio_data
+
+  prometheus_data:
+    driver: local
+    name: lagos_prometheus_data
+
+  grafana_data:
+    driver: local
+    name: lagos_grafana_data
+
+# ============================================================
+# NETWORKS — All services talk through this bridge
+# ============================================================
+
+networks:
+  lagos_network:
+    driver: bridge
+    name: lagos_network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 # Fixed subnet, no IP conflicts
+

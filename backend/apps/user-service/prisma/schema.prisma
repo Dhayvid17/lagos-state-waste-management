@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum KycStatus {
+  NOT_SUBMITTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum Theme {
+  light
+  dark
+  auto
+}
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+// ============================================================
+// USER PROFILE
+// Linked to auth-service User via authId (MongoDB ObjectId string)
+// ============================================================
+
+model UserProfile {
+  id        String   @id @default(uuid())
+  authId    String   @unique // MongoDB _id from auth-service
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ----------------------------------------------------------
+  // PERSONAL INFORMATION
+  // ----------------------------------------------------------
+  firstName  String
+  lastName   String
+  middleName String?
+  avatarUrl  String?
+  bio        String?  @db.VarChar(500)
+  dateOfBirth DateTime?
+  gender     Gender?
+
+  // ----------------------------------------------------------
+  // NIGERIAN CONTACT
+  // ----------------------------------------------------------
+  phoneNumber String?  @unique // +234XXXXXXXXXX strictly
+  lgaId       LagosLGA?        // Which of 20 Lagos LGAs
+
+  // ----------------------------------------------------------
+  // ADDRESS
+  // ----------------------------------------------------------
+  address    String?
+  city       String?
+  state      String?  @default("Lagos")
+  postalCode String?
+  country    String?  @default("Nigeria")
+
+  // Geolocation — stored as lat/lng for PostGIS queries
+  latitude   Float?
+  longitude  Float?
+
+  // ----------------------------------------------------------
+  // KYC & COMPLIANCE
+  // ----------------------------------------------------------
+  kycStatus          KycStatus @default(NOT_SUBMITTED)
+  kycVerifiedAt      DateTime?
+  kycRejectedReason  String?
+
+  // NDPA — Nigerian Data Protection Act (MANDATORY)
+  ndpaConsentGiven     Boolean  @default(false)
+  ndpaConsentTimestamp DateTime?
+  ndpaConsentIp        String?
+
+  // ----------------------------------------------------------
+  // PUSH NOTIFICATIONS
+  // ----------------------------------------------------------
+  fcmTokens  String[] @default([]) // Firebase push notification tokens per device
+
+  // ----------------------------------------------------------
+  // GAMIFICATION & REWARDS
+  // ----------------------------------------------------------
+  totalPointsEarned  Int     @default(0)
+  badges             String[] @default([]) // ['eco-warrior', 'top-recycler']
+
+  // ----------------------------------------------------------
+  // COLLECTOR SPECIFIC
+  // ----------------------------------------------------------
+  isActiveDriver     Boolean @default(false)
+
+  // ----------------------------------------------------------
+  // NOTIFICATION PREFERENCES
+  // ----------------------------------------------------------
+  emailNotifications Boolean @default(true)
+  smsNotifications   Boolean @default(true)
+  pushNotifications  Boolean @default(true)
+  marketingEmails    Boolean @default(false)
+
+  // ----------------------------------------------------------
+  // APP PREFERENCES
+  // ----------------------------------------------------------
+  preferredLanguage  String  @default("en")
+  timezone           String  @default("Africa/Lagos")
+  theme              Theme   @default(auto)
+
+  // ----------------------------------------------------------
+  // PROFILE METADATA
+  // ----------------------------------------------------------
+  profileCompleteness  Int     @default(0) // 0-100 percentage
+  isProfileComplete    Boolean @default(false)
+  isVerified           Boolean @default(false) // KYC + ID verified
+  profileViews         Int     @default(0)
+  lastProfileUpdate    DateTime?
+
+  // Social links
+  facebookUrl   String?
+  twitterUrl    String?
+  linkedinUrl   String?
+  instagramUrl  String?
+
+  // Custom metadata
+  metadata Json @default("{}")
+  settings Json @default("{}")
+
+  // ----------------------------------------------------------
+  // RELATIONS
+  // ----------------------------------------------------------
+  socialLinks UserSocialLink[]
+
+  // ----------------------------------------------------------
+  // INDEXES
+  // ----------------------------------------------------------
+  @@index([authId])
+  @@index([lgaId])
+  @@index([kycStatus])
+  @@index([isActiveDriver])
+  @@index([totalPointsEarned(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("user_profiles")
+}
+
+// ============================================================
+// AUDIT LOG
+// Every AGENCY_ADMIN and SYS_ADMIN action is permanently logged
+// ============================================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+
+  actorId    String   // authId of who performed the action
+  actorRole  String   // Their role at time of action
+  action     String   // e.g. "BAN_USER", "VERIFY_REPORT"
+  targetId   String?  // Who/what was acted on
+  targetType String?  // e.g. "USER", "REPORT"
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json     @default("{}")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// OPTIONAL: Normalized social links table
+// ============================================================
+
+model UserSocialLink {
+  id        String      @id @default(uuid())
+  userId    String
+  platform  String      // 'facebook', 'twitter', etc.
+  url       String
+  profile   UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform])
+  @@map("user_social_links")
+}

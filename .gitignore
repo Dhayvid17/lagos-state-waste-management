@@ -1,0 +1,83 @@
+# =======================================
+# COMPILED OUTPUT
+# =======================================
+dist/
+build/
+generated/
+
+# =======================================
+# DEPENDENCIES — catch at all levels
+# =======================================
+node_modules/
+
+# =======================================
+# ENVIRONMENT FILES — NEVER commit these
+# =======================================
+.env
+.env.dev
+.env.prod
+.env.local
+.env.test
+.env.test.local
+.env.*local
+.env.staging
+
+# =======================================
+# LOGS
+# =======================================
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# =======================================
+# TESTING & COVERAGE
+# =======================================
+/coverage
+/.nyc_output
+
+# =======================================
+# PRISMA
+# =======================================
+prisma/migrations/
+**/prisma/migrations/
+
+# =======================================
+# OS
+# =======================================
+.DS_Store
+Thumbs.db
+
+# =======================================
+# IDE
+# =======================================
+.idea/
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# =======================================
+# TEMP
+# =======================================
+.temp/
+.tmp/
+
+# =======================================
+# RUNTIME
+# =======================================
+pids/
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
