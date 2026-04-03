@@ -1,8 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "outDir": "../../dist/apps/auth-service",
-    "baseUrl": "../../"
+    "outDir": "../../dist/apps/auth-service"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]

@@ -27,5 +27,5 @@ docker-compose.yml
 
 # Config files
 nest-cli.json
-tsconfig*.json
+# tsconfig*.json
 jest.config.js

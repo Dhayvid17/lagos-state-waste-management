@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { ClientsModule, Transport } from '@nestjs/microservices';
 
 import authConfig from './config/auth.config.js';
 import { AuthController } from './auth.controller.js';
@@ -58,6 +59,21 @@ import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
         ],
       }),
     }),
+
+    // ── NATS JetStream client — fires events to other services
+    ClientsModule.registerAsync([
+      {
+        name: 'NATS_SERVICE',
+        inject: [ConfigService],
+        useFactory: (config: ConfigService) => ({
+          transport: Transport.NATS,
+          options: {
+            servers: [config.get<string>('auth.nats.url') ?? 'nats://localhost:4222'],
+            queue: 'auth-service',
+          },
+        }),
+      },
+    ]),
   ],
   controllers: [AuthController],
   providers: [

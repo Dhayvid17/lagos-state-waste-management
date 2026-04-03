@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -28,6 +29,7 @@ import {
   ChangePasswordDto,
 } from './dto/verify-email.dto.js';
 import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
+import { ClientProxy } from '@nestjs/microservices';
 
 @Injectable()
 export class AuthService {
@@ -38,6 +40,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly tokenBlocklist: TokenBlocklistService,
+    @Inject('NATS_SERVICE') private readonly natsClient: ClientProxy,
   ) {}
 
   // ============================================================
@@ -90,11 +93,19 @@ export class AuthService {
       this.logger.log(`New user registered: ${user.email} [${role}]`);
 
       // 7. TODO: Fire NATS event → notification-service sends verification email
-      // this.natsClient.emit(NatsEvents.USER_CREATED, { userId: user._id, email: user.email })
+      this.natsClient.emit(NatsEvents.USER_CREATED, {
+        authId: String(user._id),
+        email: user.email,
+        role: user.role,
+        phoneNumber: user.phoneNumber,
+        timestamp: new Date().toISOString(),
+      });
+
+      this.logger.log(`NATS event fired: ${NatsEvents.USER_CREATED} for ${user.email}`);
 
       return {
         message: 'Registration successful. Please verify your email.',
-        userId: user._id,
+        userId: String(user._id),
       };
     } catch (error) {
       if (error instanceof ConflictException) throw error;

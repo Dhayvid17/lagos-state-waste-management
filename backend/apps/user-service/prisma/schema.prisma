@@ -11,7 +11,7 @@ datasource db {
 // ============================================================
 
 enum KycStatus {
-  NOT_SUBMITTED
+  NOT_SUBMITTED 
   PENDING
   VERIFIED
   REJECTED

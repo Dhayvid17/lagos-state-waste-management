@@ -40,3 +40,11 @@ export interface GeoLocation {
   address?: string;
   lgaId?: LagosLGA;
 }
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: JwtPayload;
+    }
+  }
+}
