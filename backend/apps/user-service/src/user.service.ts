@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -10,11 +11,16 @@ import { JwtPayload, LagosLGA, PaginatedResponse, UserRole } from '@app/shared';
 import { CreateProfileDto } from './dto/create-profile.dto.js';
 import type { UpdateProfileDto, UpdateLocationDto } from './dto/update-profile.dto.js';
 import { PrismaService } from './prisma/prisma.service.js';
+import type Redis from 'ioredis';
 
 @Injectable()
 export class UserService {
   private readonly logger = new Logger(UserService.name);
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject('REDIS_CLIENT')
+    private readonly redis: Redis,
+  ) {}
 
   // ============================================================
   // NATS EVENT HANDLER — Create profile automatically
@@ -72,33 +78,37 @@ export class UserService {
       throw new NotFoundException('Profile not found');
     }
 
-    // Calculate profile completeness after update
-    const updated = await this.prisma.userProfile.update({
-      where: { authId: user.sub },
-      data: {
-        ...dto,
-        dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
-        lastProfileUpdate: new Date(),
-      },
+    // ── Single transaction — both updates succeed or both rollback
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // 1. Update profile fields
+      const updatedProfile = await tx.userProfile.update({
+        where: { authId: user.sub },
+        data: {
+          ...dto,
+          dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+          lastProfileUpdate: new Date(),
+        },
+      });
+
+      // 2. Recalculate and update completeness in same transaction
+      const completeness = this.calculateCompleteness(updatedProfile);
+
+      return tx.userProfile.update({
+        where: { authId: user.sub },
+        data: {
+          profileCompleteness: completeness,
+          isProfileComplete: completeness === 100,
+        },
+      });
     });
 
-    // Recalculate completeness
-    const completeness = this.calculateCompleteness(updated);
-    await this.prisma.userProfile.update({
-      where: { authId: user.sub },
-      data: {
-        profileCompleteness: completeness,
-        isProfileComplete: completeness === 100,
-      },
-    });
-
-    return { ...updated, profileCompleteness: completeness };
+    return updated;
   }
 
   // ============================================================
   // GET PUBLIC PROFILE
   // ============================================================
-  async getPublicProfile(profileId: string) {
+  async getPublicProfile(profileId: string, viewerIp: string) {
     const profile = await this.prisma.userProfile.findUnique({
       where: { id: profileId },
       select: {
@@ -121,11 +131,21 @@ export class UserService {
 
     if (!profile) throw new NotFoundException('Profile not found');
 
-    // Increment profile views
-    await this.prisma.userProfile.update({
-      where: { id: profileId },
-      data: { profileViews: { increment: 1 } },
-    });
+    // ── Redis view deduplication
+    // One view per IP per profile per hour
+    const viewKey = `profile_view:${profileId}:${viewerIp}`;
+    const alreadyViewed = await this.redis.get(viewKey);
+
+    if (!alreadyViewed) {
+      // Mark as viewed — expires after 1 hour
+      await this.redis.set(viewKey, '1', 'EX', 60 * 60);
+
+      // Increment view count only for unique views
+      await this.prisma.userProfile.update({
+        where: { id: profileId },
+        data: { profileViews: { increment: 1 } },
+      });
+    }
 
     return profile;
   }
@@ -196,41 +216,57 @@ export class UserService {
       throw new ForbiddenException('Only Agency Admins can verify KYC');
     }
 
-    const profile = await this.prisma.userProfile.findUnique({
-      where: { id: profileId },
+    // ── Transaction wraps both the update and audit log
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const profile = await tx.userProfile.findUnique({
+        where: { id: profileId },
+      });
+
+      if (!profile) throw new NotFoundException('Profile not found');
+
+      // AGENCY_ADMIN can only verify users in their LGA
+      if (actor.role === UserRole.AGENCY_ADMIN && profile.lgaId !== actor.lgaId) {
+        throw new ForbiddenException('You can only verify users in your LGA');
+      }
+
+      // ── Prevent re-verifying already verified profiles
+      if (profile.kycStatus === 'VERIFIED' && status === 'VERIFIED') {
+        throw new BadRequestException('Profile is already verified');
+      }
+
+      // ── Prevent re-rejecting already rejected profiles
+      if (profile.kycStatus === 'REJECTED' && status === 'REJECTED') {
+        throw new BadRequestException('Profile is already rejected');
+      }
+
+      // 1. Update KYC status
+      const updatedProfile = await tx.userProfile.update({
+        where: { id: profileId },
+        data: {
+          kycStatus: status,
+          kycVerifiedAt: status === 'VERIFIED' ? new Date() : null,
+          kycRejectedReason: status === 'REJECTED' ? (reason ?? null) : null,
+          isVerified: status === 'VERIFIED',
+        },
+      });
+
+      // 2. Write audit log in same transaction
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.sub,
+          actorRole: actor.role,
+          action: `KYC_${status}`,
+          targetId: profileId,
+          targetType: 'USER_PROFILE',
+          metadata: { reason: reason ?? null },
+        },
+      });
+
+      return updatedProfile;
     });
 
-    if (!profile) throw new NotFoundException('Profile not found');
-
-    // AGENCY_ADMIN can only verify users in their LGA
-    if (actor.role === UserRole.AGENCY_ADMIN && profile.lgaId !== actor.lgaId) {
-      throw new ForbiddenException('You can only verify users in your LGA');
-    }
-
-    const updated = await this.prisma.userProfile.update({
-      where: { id: profileId },
-      data: {
-        kycStatus: status,
-        kycVerifiedAt: status === 'VERIFIED' ? new Date() : null,
-        kycRejectedReason: status === 'REJECTED' ? reason : null,
-        isVerified: status === 'VERIFIED',
-      },
-    });
-
-    // Write to audit log
-    await this.prisma.auditLog.create({
-      data: {
-        actorId: actor.sub,
-        actorRole: actor.role,
-        action: `KYC_${status}`,
-        targetId: profileId,
-        targetType: 'USER_PROFILE',
-        metadata: { reason: reason ?? null },
-      },
-    });
-
+    // Log the KYC action with details
     this.logger.log(`KYC ${status} for profile ${profileId} by ${actor.sub}`);
-
     return updated;
   }
 
@@ -244,13 +280,22 @@ export class UserService {
 
     if (!profile) throw new NotFoundException('Profile not found');
 
-    // Avoid duplicates — only add if not already present
-    if (!profile.fcmTokens.includes(token)) {
-      await this.prisma.userProfile.update({
-        where: { authId: user.sub },
-        data: { fcmTokens: { push: token } },
-      });
+    // ── Already registered
+    if (profile.fcmTokens.includes(token)) {
+      return { message: 'FCM token already registered' };
     }
+
+    // ── Cap at 5 devices — remove oldest if limit reached
+    const updatedTokens = [...profile.fcmTokens, token];
+    if (updatedTokens.length > 5) {
+      updatedTokens.shift(); // Remove oldest token
+      this.logger.warn(`FCM token cap reached for user ${user.sub} — oldest removed`);
+    }
+
+    await this.prisma.userProfile.update({
+      where: { authId: user.sub },
+      data: { fcmTokens: updatedTokens },
+    });
 
     return { message: 'FCM token registered successfully' };
   }

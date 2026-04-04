@@ -9,6 +9,7 @@ import { UserService } from './user.service.js';
 import { UserCreatedHandler } from './events/user-created.handler.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { PrismaService } from './prisma/prisma.service.js';
+import Redis from 'ioredis';
 
 @Module({
   imports: [
@@ -45,6 +46,20 @@ import { PrismaService } from './prisma/prisma.service.js';
     UserController,
     UserCreatedHandler, // ← NATS event listener
   ],
-  providers: [UserService, JwtAuthGuard, PrismaService],
+  providers: [
+    UserService,
+    JwtAuthGuard,
+    PrismaService,
+    {
+      provide: 'REDIS_CLIENT',
+      useFactory: () =>
+        new Redis({
+          host: process.env.REDIS_HOST ?? 'localhost',
+          port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+          password: process.env.REDIS_PASSWORD,
+          retryStrategy: (times) => (times > 3 ? null : times * 1000),
+        }),
+    },
+  ],
 })
 export class UserModule {}

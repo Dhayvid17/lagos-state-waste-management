@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Ip,
   Param,
   Patch,
   Post,
@@ -72,8 +73,8 @@ export class UserController {
   // ── GET /api/users/:id (public profile)
   @Get(':id')
   @ApiOperation({ summary: 'Get public profile by ID' })
-  getPublicProfile(@Param('id') id: string) {
-    return this.userService.getPublicProfile(id);
+  getPublicProfile(@Param('id') id: string, @Ip() ip: string) {
+    return this.userService.getPublicProfile(id, ip);
   }
 
   // ── GET /api/users (admin only)

@@ -47,71 +47,86 @@ export class AuthService {
   // REGISTER
   // ============================================================
   async register(dto: RegisterDto, req: Request) {
+    // 1. Check NDPA consent — Nigerian law requires explicit consent
+    if (!dto.ndpaConsent) {
+      throw new BadRequestException('You must accept the data privacy policy to create an account');
+    }
+
+    // 2. Check if email already exists
+    const existingUser = await this.userModel.findOne({
+      email: dto.email.toLowerCase().trim(),
+    });
+
+    if (existingUser) {
+      throw new ConflictException('An account with this email already exists');
+    }
+
+    // 3. Hash password
+    const rounds = this.configService.get<number>('auth.security.bcryptRounds')!;
+    const passwordHash = await bcrypt.hash(dto.password, rounds);
+
+    // 4. Generate email verification token
+    const emailVerificationToken = crypto.randomBytes(32).toString('hex');
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+    // 5. Assign default permissions based on role
+    const role = dto.role ?? UserRole.CITIZEN;
+    const permissions = [...ROLE_PERMISSIONS[role]];
+
+    // ── Start MongoDB session for atomic operation
+    const session = await this.userModel.db.startSession();
+
     try {
-      // 1. Check NDPA consent — Nigerian law requires explicit consent
-      if (!dto.ndpaConsent) {
-        throw new BadRequestException(
-          'You must accept the data privacy policy to create an account',
-        );
-      }
-
-      // 2. Check if email already exists
-      const existingUser = await this.userModel.findOne({
-        email: dto.email.toLowerCase().trim(),
-      });
-
-      if (existingUser) {
-        throw new ConflictException('An account with this email already exists');
-      }
-
-      // 3. Hash password
-      const rounds = this.configService.get<number>('auth.security.bcryptRounds')!;
-      const passwordHash = await bcrypt.hash(dto.password, rounds);
-
-      // 4. Generate email verification token
-      const emailVerificationToken = crypto.randomBytes(32).toString('hex');
-      const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-
-      // 5. Assign default permissions based on role
-      const role = dto.role ?? UserRole.CITIZEN;
-      const permissions = [...ROLE_PERMISSIONS[role]];
-
+      session.startTransaction();
       // 6. Create user
-      const user = await this.userModel.create({
-        email: dto.email.toLowerCase().trim(),
-        passwordHash,
-        phoneNumber: dto.phoneNumber,
-        role,
-        permissions,
-        emailVerificationToken,
-        emailVerificationExpires,
-        ndpaConsentGiven: true,
-        ndpaConsentTimestamp: new Date(),
-        ndpaConsentIp: req.ip,
-      });
+      const [user] = await this.userModel.create(
+        [
+          {
+            email: dto.email.toLowerCase().trim(),
+            passwordHash,
+            phoneNumber: dto.phoneNumber,
+            role,
+            permissions,
+            emailVerificationToken,
+            emailVerificationExpires,
+            ndpaConsentGiven: true,
+            ndpaConsentTimestamp: new Date(),
+            ndpaConsentIp: req.ip,
+          },
+        ],
+        { session },
+      );
+
+      // 7. Fire NATS event → notification-service sends verification email, if this throws, transaction rolls back
+      await this.natsClient
+        .emit(NatsEvents.USER_CREATED, {
+          authId: String(user._id),
+          email: user.email,
+          role: user.role,
+          phoneNumber: user.phoneNumber,
+          timestamp: new Date().toISOString(),
+        })
+        .toPromise();
+
+      // 8. Both succeeded — commit
+      await session.commitTransaction();
 
       this.logger.log(`New user registered: ${user.email} [${role}]`);
-
-      // 7. TODO: Fire NATS event → notification-service sends verification email
-      this.natsClient.emit(NatsEvents.USER_CREATED, {
-        authId: String(user._id),
-        email: user.email,
-        role: user.role,
-        phoneNumber: user.phoneNumber,
-        timestamp: new Date().toISOString(),
-      });
-
-      this.logger.log(`NATS event fired: ${NatsEvents.USER_CREATED} for ${user.email}`);
+      this.logger.log(`NATS event fired: ${NatsEvents.USER_CREATED}`);
 
       return {
         message: 'Registration successful. Please verify your email.',
         userId: String(user._id),
       };
     } catch (error) {
+      // ── Rollback everything if anything failed
+      await session.abortTransaction();
       if (error instanceof ConflictException) throw error;
-      // Log the actual error for debugging
-      console.error('Registration error:', error);
-      throw new InternalServerErrorException('Failed to register user');
+      this.logger.error(`Registration failed and rolled back: ${(error as Error).message}`);
+      throw new InternalServerErrorException('Registration failed. Please try again.');
+    } finally {
+      // ── Always end session whether success or failure
+      await session.endSession();
     }
   }
 
