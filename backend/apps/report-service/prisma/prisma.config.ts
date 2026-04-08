@@ -11,11 +11,11 @@ config({ path: resolve(process.cwd(), '.env.dev') }); // fallback
 // Prisma Configuration
 // ============================================================
 export default defineConfig({
-  schema: resolve(process.cwd(), './apps/user-service/prisma/schema.prisma'),
+  schema: resolve(process.cwd(), 'apps/report-service/prisma/schema.prisma'),
   migrations: {
-    path: resolve(process.cwd(), './apps/user-service/prisma/migrations'),
+    path: resolve(process.cwd(), 'apps/report-service/prisma/migrations'),
   },
   datasource: {
-    url: process.env.DATABASE_URL_USERS ?? process.env.DATABASE_URL ?? '',
+    url: process.env.DATABASE_URL_REPORTS ?? process.env.DATABASE_URL ?? '',
   },
 });

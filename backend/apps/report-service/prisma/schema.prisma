@@ -1,0 +1,272 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum ReportStatus {
+  PENDING
+  UNDER_REVIEW
+  VERIFIED
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum WasteType {
+  GENERAL
+  RECYCLABLE
+  ORGANIC
+  ELECTRONIC
+  HAZARDOUS
+  CONSTRUCTION
+}
+
+enum ReportSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+// ============================================================
+// REWARD POINTS CONFIG
+// Stored in DB — adjustable without redeployment
+// ============================================================
+
+model RewardPointsConfig {
+  id        String    @id @default(uuid())
+  wasteType WasteType @unique
+  basePoints Int
+
+  // Bonus multipliers — stored as decimals
+  // e.g. 1.5 = 50% bonus
+  firstReportOfDayMultiplier    Float @default(1.0)
+  underservedLgaMultiplier      Float @default(1.0)
+  verifiedReporterMultiplier    Float @default(1.0) // KYC verified citizens get bonus
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("reward_points_config")
+}
+
+// ============================================================
+// WASTE REPORT
+// ============================================================
+
+model WasteReport {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ----------------------------------------------------------
+  // REPORTER INFO
+  // Linked to auth-service via authId (MongoDB ObjectId string)
+  // ----------------------------------------------------------
+  reporterAuthId String  // who submitted this report
+  reporterName   String? // denormalized for quick display
+
+  // ----------------------------------------------------------
+  // LOCATION — PostGIS stored as lat/lng
+  // ----------------------------------------------------------
+  latitude   Float
+  longitude  Float
+  address    String?    // Human readable address
+  landmark   String?    // e.g. "Near Shoprite Ikeja"
+  lgaId      LagosLGA   // Which of 20 Lagos LGAs
+
+  // ----------------------------------------------------------
+  // REPORT DETAILS
+  // ----------------------------------------------------------
+  title       String         @db.VarChar(200)
+  description String         @db.VarChar(2000)
+  wasteType   WasteType
+  severity    ReportSeverity @default(LOW)
+
+  // ----------------------------------------------------------
+  // MEDIA — URLs stored here, actual files in MinIO
+  // ----------------------------------------------------------
+  mediaUrls   String[] @default([]) // Photos/videos from media-service
+  thumbnailUrl String?              // Auto-generated thumbnail
+
+  // ----------------------------------------------------------
+  // STATUS LIFECYCLE
+  // ----------------------------------------------------------
+  status      ReportStatus @default(PENDING)
+
+  // ── Lock timestamp — when admin first touches it
+  lockedAt    DateTime?    // Set when status moves to UNDER_REVIEW
+  lockedById  String?      // Which admin locked it
+
+  // ── Verification
+  verifiedAt  DateTime?
+  verifiedById String?
+  verificationNote String?
+
+  // ── Assignment
+  assignedAt          DateTime?
+  assignedCollectorId String?   // authId of assigned collector
+  assignedById        String?   // admin who assigned
+
+  // ── Completion
+  completedAt     DateTime?
+  collectorNote   String?       // Collector's note on completion
+  pointsAwarded   Int?          // Actual points given after completion
+
+  // ── Rejection
+  rejectedAt      DateTime?
+  rejectedById    String?
+  rejectionReason String?
+
+  // ── Cancellation (citizen requested)
+  cancelledAt     DateTime?
+  cancellationReason String?
+  cancellationRequestedAt DateTime? // When citizen requested it
+
+  // ----------------------------------------------------------
+  // DUPLICATE DETECTION
+  // ----------------------------------------------------------
+  isDuplicate        Boolean @default(false)
+  duplicateOfReportId String? // If this is a duplicate, link to original
+
+  // ----------------------------------------------------------
+  // UPVOTES — other citizens confirming the dump is real
+  // ----------------------------------------------------------
+  upvoteCount  Int      @default(0)
+  upvotedByIds String[] @default([]) // authIds of upvoters (max 100)
+
+  // ----------------------------------------------------------
+  // METADATA
+  // ----------------------------------------------------------
+  deviceInfo  Json? // Mobile/browser info for fraud detection
+  appVersion  String?
+  metadata    Json  @default("{}")
+
+  // ----------------------------------------------------------
+  // RELATIONS
+  // ----------------------------------------------------------
+  statusHistory ReportStatusHistory[]
+  comments      ReportComment[]
+
+  // ----------------------------------------------------------
+  // INDEXES
+  // ----------------------------------------------------------
+  @@index([reporterAuthId])
+  @@index([lgaId])
+  @@index([status])
+  @@index([wasteType])
+  @@index([severity])
+  @@index([assignedCollectorId])
+  @@index([createdAt(sort: Desc)])
+  @@index([latitude, longitude]) // Geospatial queries
+  @@index([lgaId, status])       // Most common admin query
+  @@index([reporterAuthId, status]) // Citizen's own reports
+
+  @@map("waste_reports")
+}
+
+// ============================================================
+// STATUS HISTORY — Immutable audit trail of every status change
+// ============================================================
+
+model ReportStatusHistory {
+  id        String       @id @default(uuid())
+  createdAt DateTime     @default(now())
+
+  reportId  String
+  report    WasteReport  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  fromStatus ReportStatus?  // null for initial creation
+  toStatus   ReportStatus
+  changedById String        // authId of who changed it
+  changedByRole String      // role at time of change
+  note       String?        // Optional note explaining the change
+  metadata   Json           @default("{}")
+
+  @@index([reportId])
+  @@index([createdAt(sort: Desc)])
+  @@map("report_status_history")
+}
+
+// ============================================================
+// REPORT COMMENTS — Agency admins and collectors can comment
+// Citizens cannot comment — they can only submit the report
+// ============================================================
+
+model ReportComment {
+  id        String      @id @default(uuid())
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  reportId  String
+  report    WasteReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  authorId   String  // authId
+  authorRole String  // role at time of comment
+  content    String  @db.VarChar(1000)
+  isInternal Boolean @default(false) // Internal = only visible to admins
+
+  @@index([reportId])
+  @@index([authorId])
+  @@map("report_comments")
+}
+
+// ============================================================
+// COLLECTOR ROUTES — Grouped assignments for a collector
+// ============================================================
+
+model CollectorRoute {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  collectorAuthId String
+  lgaId           LagosLGA
+  assignedById    String    // Admin who created this route
+  isActive        Boolean   @default(true)
+
+  // Route completion
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  metadata Json @default("{}")
+
+  @@index([collectorAuthId])
+  @@index([lgaId])
+  @@index([isActive])
+  @@map("collector_routes")
+}

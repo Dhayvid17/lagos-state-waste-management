@@ -25,25 +25,7 @@
       "entryFile": "main",
       "sourceRoot": "apps/user-service/src",
       "compilerOptions": {
-        "tsConfigPath": "apps/user-service/tsconfig.app.json",
-        "assets": [
-          { 
-            "include": "generated/prisma/**/*.wasm",
-            "outDir": "../../dist/apps/user-service",
-            "watchAssets": true
-          },
-          {
-            "include": "generated/prisma/**/*.mjs",
-            "outDir": "../../dist/apps/user-service",
-            "watchAssets": true
-          },
-          {
-            "include": "generated/prisma/**/*.js",
-            "outDir": "../../dist/apps/user-service",
-            "watchAssets": true
-          }
-        ]
-      }
+        "tsConfigPath": "apps/user-service/tsconfig.app.json"
       }
     },
     "report-service": {
@@ -92,3 +74,4 @@
       }
     }
   }
+}

@@ -6,7 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+// PrismaClient is handled by PrismaService which extends it
 import { JwtPayload, LagosLGA, PaginatedResponse, UserRole } from '@app/shared';
 import { CreateProfileDto } from './dto/create-profile.dto.js';
 import type { UpdateProfileDto, UpdateLocationDto } from './dto/update-profile.dto.js';

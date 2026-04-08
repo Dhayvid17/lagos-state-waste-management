@@ -9,13 +9,13 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   constructor() {
     const { Pool } = require('pg');
     const pool = new Pool({
-      connectionString: process.env.DATABASE_URL_USERS ?? process.env.DATABASE_URL,
+      connectionString: process.env.DATABASE_URL_REPORTS ?? process.env.DATABASE_URL,
     });
     pool.on('connect', (client: any) => {
-      client.query('SET search_path TO users, public;');
+      client.query('SET search_path TO reports, public;');
     });
 
-    const adapter = new PrismaPg(pool, { schema: 'users' });
+    const adapter = new PrismaPg(pool, { schema: 'reports' });
     super({ adapter });
   }
 

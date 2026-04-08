@@ -31,13 +31,28 @@ export enum Permission {
   ADMIN_ALL = 'admin:all',
 }
 
+// ── Updated report status — semi-immutable lifecycle
 export enum ReportStatus {
-  PENDING = 'PENDING',
-  VERIFIED = 'VERIFIED',
-  ASSIGNED = 'ASSIGNED',
-  COMPLETED = 'COMPLETED',
-  REJECTED = 'REJECTED',
+  PENDING = 'PENDING', // Citizen submitted, no admin touched it
+  UNDER_REVIEW = 'UNDER_REVIEW', // Admin opened it — locks citizen edits
+  VERIFIED = 'VERIFIED', // Admin confirmed it is real
+  ASSIGNED = 'ASSIGNED', // Collector assigned to it
+  IN_PROGRESS = 'IN_PROGRESS', // Collector en route
+  COMPLETED = 'COMPLETED', // Waste collected — triggers points
+  REJECTED = 'REJECTED', // Admin rejected — fake/duplicate report
+  CANCELLED = 'CANCELLED', // Citizen requested cancellation (soft delete)
 }
+
+// ── Statuses where citizen can NO LONGER edit
+export const LOCKED_STATUSES: ReportStatus[] = [
+  ReportStatus.UNDER_REVIEW,
+  ReportStatus.VERIFIED,
+  ReportStatus.ASSIGNED,
+  ReportStatus.IN_PROGRESS,
+  ReportStatus.COMPLETED,
+  ReportStatus.REJECTED,
+  ReportStatus.CANCELLED,
+];
 
 export enum WasteType {
   GENERAL = 'GENERAL',
@@ -45,6 +60,14 @@ export enum WasteType {
   HAZARDOUS = 'HAZARDOUS',
   ORGANIC = 'ORGANIC',
   ELECTRONIC = 'ELECTRONIC',
+  CONSTRUCTION = 'CONSTRUCTION',
+}
+
+export enum ReportSeverity {
+  LOW = 'LOW', // Small dump, not urgent
+  MEDIUM = 'MEDIUM', // Moderate, needs attention within a week
+  HIGH = 'HIGH', // Large dump, health risk
+  CRITICAL = 'CRITICAL', // Immediate danger — toxic/chemical
 }
 
 export enum KycStatus {
@@ -73,10 +96,13 @@ export enum NatsEvents {
   REPORT_VERIFIED = 'report.verified',
   REPORT_ASSIGNED = 'report.assigned',
   REPORT_COMPLETED = 'report.completed',
+  REPORT_REJECTED = 'report.rejected',
+  REPORT_CANCELLED = 'report.cancelled',
 
-  // Payment events
+  // Payment/Point events
   PAYMENT_SUCCESS = 'payment.success',
   PAYMENT_FAILED = 'payment.failed',
+  POINTS_AWARDED = 'points.awarded',
 
   // User events
   USER_CREATED = 'user.created',
@@ -85,6 +111,7 @@ export enum NatsEvents {
   // Notification events
   SEND_SMS = 'notification.send_sms',
   SEND_EMAIL = 'notification.send_email',
+  SEND_PUSH = 'notification.send_push',
 }
 
 export enum LagosLGA {
