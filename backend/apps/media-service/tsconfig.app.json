@@ -1,9 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "../../",
-    "outDir": "../../dist/apps/media-service",
-    "baseUrl": "../../"
+    "outDir": "../../dist/apps/media-service"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]
