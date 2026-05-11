@@ -5,6 +5,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { TerminusModule } from '@nestjs/terminus';
 
 import authConfig from './config/auth.config.js';
 import { AuthController } from './auth.controller.js';
@@ -14,6 +15,8 @@ import { JwtAccessStrategy } from './strategies/jwt-access.strategy.js';
 import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
+import { RedisThrottlerStorage } from './throttler/redis-throttler.storage.js';
+import { AuthHealthController } from './health/health.controller.js';
 
 @Module({
   imports: [
@@ -47,16 +50,17 @@ import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
     // Passport
     PassportModule.register({ defaultStrategy: 'jwt-access' }),
 
-    // Rate limiting — 10 requests per 60s globally
+    // Rate limiting — 10 requests per 60s, backed by Redis (survives restarts)
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         throttlers: [
           {
-            ttl: config.get<number>('auth.redis.port') ? 60000 : 60000,
+            ttl: 60000, // 60 seconds
             limit: 10,
           },
         ],
+        storage: new RedisThrottlerStorage(config),
       }),
     }),
 
@@ -74,8 +78,9 @@ import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
         }),
       },
     ]),
+    TerminusModule,
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, AuthHealthController],
   providers: [
     AuthService,
     JwtAccessStrategy,

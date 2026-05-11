@@ -3,25 +3,24 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TerminusModule } from '@nestjs/terminus';
-
-import userConfig from './config/user.config.js';
-import { UserController } from './user.controller.js';
-import { UserService } from './user.service.js';
-import { UserCreatedHandler } from './events/user-created.handler.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { PrismaService } from './prisma/prisma.service.js';
-import { UserHealthController } from './health/health.controller.js';
 import Redis from 'ioredis';
+
+import reportConfig from './config/report.config.js';
+import { ReportController } from './report.controller.js';
+import { ReportService } from './report.service.js';
+import { PrismaService } from './prisma/prisma.service.js';
+import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { ReportHealthController } from './health/health.controller.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [userConfig],
+      load: [reportConfig],
       envFilePath: ['../.env.dev', '.env.dev', '.env'],
     }),
 
-    // JWT — for validating tokens independently
+    // JWT — validate tokens independently
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -29,7 +28,7 @@ import Redis from 'ioredis';
       }),
     }),
 
-    // NATS — for receiving events from auth-service
+    // NATS — fire events to other services
     ClientsModule.registerAsync([
       {
         name: 'NATS_SERVICE',
@@ -37,23 +36,21 @@ import Redis from 'ioredis';
         useFactory: (config: ConfigService) => ({
           transport: Transport.NATS,
           options: {
-            servers: [config.get<string>('user.nats.url') ?? 'nats://localhost:4222'],
-            queue: 'user-service',
+            servers: [config.get<string>('report.nats.url') ?? 'nats://localhost:4222'],
+            queue: 'report-service',
           },
         }),
       },
     ]),
     TerminusModule,
   ],
-  controllers: [
-    UserController,
-    UserCreatedHandler,
-    UserHealthController,
-  ],
+  controllers: [ReportController, ReportHealthController],
   providers: [
-    UserService,
-    JwtAuthGuard,
+    ReportService,
     PrismaService,
+    JwtAuthGuard,
+
+    // Redis — rate limiting + duplicate detection
     {
       provide: 'REDIS_CLIENT',
       useFactory: () =>
@@ -66,4 +63,4 @@ import Redis from 'ioredis';
     },
   ],
 })
-export class UserModule {}
+export class ReportModule {}

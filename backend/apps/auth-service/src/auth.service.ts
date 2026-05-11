@@ -318,16 +318,20 @@ export class AuthService {
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-    // Store hashed reset token in DB
+    // ── Hash token before storing — same pattern as refresh tokens
+    // The raw token goes in the email link; we only ever store the hash
+    const hashedResetToken = this.hashToken(resetToken);
+
     await this.userModel.updateOne(
       { _id: user._id },
       {
-        passwordResetToken: resetToken,
+        passwordResetToken: hashedResetToken,
         passwordResetExpires: resetExpires,
       },
     );
 
     // TODO: Fire NATS event → notification-service sends reset email
+    // The link should contain the RAW token: /reset-password?token=<resetToken>
     this.logger.log(`Password reset requested for: ${user.email}`);
 
     return { message: 'If that email exists, a reset link has been sent.' };
@@ -338,9 +342,12 @@ export class AuthService {
   // ============================================================
   // Reset password using the token sent to email
   async resetPassword(dto: ResetPasswordDto) {
+    // Hash the incoming token before lookup — we only store hashes, never raw tokens
+    const hashedToken = this.hashToken(dto.token);
+
     const user = await this.userModel
       .findOne({
-        passwordResetToken: dto.token,
+        passwordResetToken: hashedToken,
         passwordResetExpires: { $gt: new Date() },
       })
       .select('+passwordResetToken');
@@ -411,6 +418,13 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException('Invalid token');
     }
+  }
+
+  // Verify refresh token signature and return payload (used by the refresh controller endpoint)
+  verifyRefreshToken(rawToken: string): { sub: string } {
+    return this.jwtService.verify<{ sub: string }>(rawToken, {
+      secret: this.configService.get<string>('auth.jwt.refreshSecret'),
+    });
   }
 
   // ============================================================

@@ -82,8 +82,14 @@ export class AuthController {
       throw new Error('No refresh token provided');
     }
 
-    // Decode without verifying to get userId — strategy will verify
-    const decoded = JSON.parse(Buffer.from(rawToken.split('.')[1], 'base64').toString());
+    // ── Cryptographically verify the refresh token before trusting its payload
+    // Previously this was an unsafe manual base64 decode — a forged token could spoof any userId
+    let decoded: { sub: string };
+    try {
+      decoded = this.authService.verifyRefreshToken(rawToken);
+    } catch {
+      throw new Error('Invalid or expired refresh token');
+    }
 
     // Call auth service to validate refresh token, generate new tokens, and rotate refresh token in DB
     const result = await this.authService.refreshTokens(
