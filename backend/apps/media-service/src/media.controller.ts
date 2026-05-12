@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 import { memoryStorage } from 'multer';
 
 import type { JwtPayload } from '@app/shared';
@@ -26,7 +27,7 @@ import { RolesGuard } from '@app/shared';
 
 @ApiTags('Media')
 @Controller('media')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, ThrottlerGuard)
 @ApiBearerAuth()
 export class MediaController {
   constructor(private readonly mediaService: MediaService) {}
@@ -34,6 +35,7 @@ export class MediaController {
   // ── POST /api/media/upload
   @Post('upload')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 10, ttl: 60000 } }) // Limit to 10 uploads per minute per IP
   @ApiOperation({ summary: 'Upload a single file (image or video)' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -64,6 +66,7 @@ export class MediaController {
   // ── POST /api/media/upload/multiple
   @Post('upload/multiple')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 5, ttl: 60000 } }) // Limit to 5 batch uploads per minute per IP
   @ApiOperation({ summary: 'Upload multiple files (max 5)' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({

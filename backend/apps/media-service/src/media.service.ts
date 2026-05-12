@@ -10,6 +10,7 @@ import { Queue } from 'bull';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import { fileTypeFromBuffer } from 'file-type';
 import type { JwtPayload } from '@app/shared';
 import { UserRole } from '@app/shared';
 
@@ -69,8 +70,8 @@ export class MediaService {
     file: UploadedFile,
     context: string = 'general', // e.g. 'report', 'profile', 'kyc'
   ): Promise<UploadResult> {
-    // ── 1. Validate file
-    const mediaType = this.validateFile(file);
+    // ── 1. Validate file (now checks magic bytes)
+    const mediaType = await this.validateFile(file);
 
     // ── 2. Generate unique key with structured path
     const ext = path.extname(file.originalname).toLowerCase();
@@ -95,52 +96,26 @@ export class MediaService {
 
     // ── 5. Queue background jobs
     if (mediaType === 'image') {
-      // Queue image compression
+      // Queue image compression — thumbnail is generated INSIDE this job (no separate thumbnail job)
       await this.mediaQueue.add(
         MediaJobs.COMPRESS_IMAGE,
-        { key, uploadedById: user.sub, mimeType: file.mimetype },
+        { key, uploadedById: user.sub, mimeType: file.mimetype, thumbnailKey },
         {
           attempts: 3,
           backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false, // Keep failed jobs for debugging
-        },
-      );
-
-      // Queue thumbnail generation
-      await this.mediaQueue.add(
-        MediaJobs.GENERATE_THUMBNAIL,
-        { sourceKey: key, thumbnailKey, mediaType: 'image' },
-        {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          delay: 2000, // Wait 2s — after compression starts
           removeOnComplete: true,
           removeOnFail: false,
         },
       );
     } else {
-      // Queue video compression (heavy job — lower priority)
+      // Queue video compression — thumbnail is generated INSIDE this job (no separate thumbnail job)
       await this.mediaQueue.add(
         MediaJobs.COMPRESS_VIDEO,
-        { key, uploadedById: user.sub, mimeType: file.mimetype, originalSizeMb: sizeMb },
-        {
-          attempts: 2, // Videos get 2 attempts only
-          backoff: { type: 'fixed', delay: 30000 }, // 30s between retries
-          priority: 10, // Lower priority than images
-          removeOnComplete: true,
-          removeOnFail: false,
-        },
-      );
-
-      // Queue video thumbnail
-      await this.mediaQueue.add(
-        MediaJobs.GENERATE_THUMBNAIL,
-        { sourceKey: key, thumbnailKey, mediaType: 'video' },
+        { key, uploadedById: user.sub, mimeType: file.mimetype, originalSizeMb: sizeMb, thumbnailKey },
         {
           attempts: 2,
-          backoff: { type: 'fixed', delay: 10000 },
-          delay: 5000, // Wait 5s for video to be available
+          backoff: { type: 'fixed', delay: 30000 },
+          priority: 10,
           removeOnComplete: true,
           removeOnFail: false,
         },
@@ -194,7 +169,7 @@ export class MediaService {
     key: string,
   ): Promise<{ key: string; presignedUrl: string; expiresInSeconds: number }> {
     // ── Validate key belongs to this user OR user is admin
-    this.validateKeyOwnership(user, key);
+    await this.validateKeyOwnership(user, key);
 
     // ── Check file exists
     const exists = await this.minioService.fileExists(key);
@@ -212,7 +187,7 @@ export class MediaService {
   async getMultiplePresignedUrls(
     user: JwtPayload,
     keys: string[],
-  ): Promise<Array<{ key: string; presignedUrl: string }>> {
+  ): Promise<Array<{ key: string; presignedUrl: string | null; error?: string }>> {
     if (keys.length > 20) {
       throw new BadRequestException('Maximum 20 keys per batch request');
     }
@@ -220,43 +195,48 @@ export class MediaService {
     const results = await Promise.all(
       keys.map(async (key) => {
         try {
-          this.validateKeyOwnership(user, key);
+          await this.validateKeyOwnership(user, key);
           const presignedUrl = await this.minioService.getPresignedUrl(key);
           return { key, presignedUrl };
-        } catch {
-          // Return null for inaccessible keys — don't fail entire batch
-          return { key, presignedUrl: '' };
+        } catch (error) {
+          // Return the error instead of silently swallowing it
+          return { key, presignedUrl: null, error: (error as Error).message };
         }
       }),
     );
 
-    // Filter out failed ones
-    return results.filter((r) => r.presignedUrl !== '');
+    // Return all results, including failed ones, so the client knows what failed and why
+    return results;
   }
 
   // ============================================================
   // DELETE FILE
   // ============================================================
   async deleteFile(user: JwtPayload, key: string): Promise<{ message: string }> {
-    // ── Validate ownership
-    this.validateKeyOwnership(user, key);
+    // ── Validate ownership securely
+    await this.validateKeyOwnership(user, key);
 
     // ── Check file exists
     const exists = await this.minioService.fileExists(key);
     if (!exists) throw new NotFoundException('Media file not found');
 
-    // ── Delete main file
-    await this.minioService.deleteFile(key);
+    // ── Queue background deletion
+    // We replaced inline deletion with a queued job. This prevents the API from 
+    // blocking on I/O, ensuring a fast response time for the client, and allows 
+    // BullMQ to automatically retry if MinIO is temporarily unreachable.
+    await this.mediaQueue.add(
+      MediaJobs.DELETE_FILE,
+      { key, deletedById: user.sub },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    );
 
-    // ── Delete thumbnail if exists
-    const thumbnailKey = key.replace(/(\.[^.]+)$/, '-thumb.webp');
-    const thumbExists = await this.minioService.fileExists(thumbnailKey);
-    if (thumbExists) {
-      await this.minioService.deleteFile(thumbnailKey);
-    }
-
-    this.logger.log(`File deleted: ${key} by ${user.sub}`);
-    return { message: 'File deleted successfully' };
+    this.logger.log(`Delete job queued for: ${key} by ${user.sub}`);
+    return { message: 'File deletion queued successfully' };
   }
 
   // ============================================================
@@ -305,44 +285,71 @@ export class MediaService {
   // PRIVATE HELPERS
   // ============================================================
 
-  private validateFile(file: UploadedFile): MediaType {
-    const isImage = this.allowedImageTypes.includes(file.mimetype);
-    const isVideo = this.allowedVideoTypes.includes(file.mimetype);
+  private async validateFile(file: UploadedFile): Promise<MediaType> {
+    // ── 1. Magic byte validation (prevent MIME spoofing)
+    const detected = await fileTypeFromBuffer(file.buffer.slice(0, 4100));
 
-    if (!isImage && !isVideo) {
+    if (!detected) {
+      throw new BadRequestException('Could not determine file type from contents. File may be corrupted or unsupported.');
+    }
+
+    const isDetectedImage = this.allowedImageTypes.includes(detected.mime);
+    const isDetectedVideo = this.allowedVideoTypes.includes(detected.mime);
+
+    if (!isDetectedImage && !isDetectedVideo) {
       throw new BadRequestException(
-        `File type '${file.mimetype}' is not allowed. ` +
-          `Allowed: ${[...this.allowedImageTypes, ...this.allowedVideoTypes].join(', ')}`,
+        `File content type '${detected.mime}' is not allowed. ` +
+          `Allowed types: ${[...this.allowedImageTypes, ...this.allowedVideoTypes].join(', ')}`,
       );
     }
 
-    if (isImage && file.size > this.maxImageSizeBytes) {
+    // ── 2. Browser MIME type validation (secondary check)
+    const isClaimedImage = this.allowedImageTypes.includes(file.mimetype);
+    const isClaimedVideo = this.allowedVideoTypes.includes(file.mimetype);
+
+    if (!isClaimedImage && !isClaimedVideo) {
+      throw new BadRequestException(
+        `Claimed file type '${file.mimetype}' from browser is not allowed.`,
+      );
+    }
+
+    // ── 3. Size validation based on detected type
+    if (isDetectedImage && file.size > this.maxImageSizeBytes) {
       throw new BadRequestException(
         `Image size exceeds maximum allowed size of ` +
           `${this.configService.get('media.upload.maxImageSizeMb')}MB`,
       );
     }
 
-    if (isVideo && file.size > this.maxVideoSizeBytes) {
+    if (isDetectedVideo && file.size > this.maxVideoSizeBytes) {
       throw new BadRequestException(
         `Video size exceeds maximum allowed size of ` +
           `${this.configService.get('media.upload.maxVideoSizeMb')}MB`,
       );
     }
 
-    return isImage ? 'image' : 'video';
+    return isDetectedImage ? 'image' : 'video';
   }
 
-  private validateKeyOwnership(user: JwtPayload, key: string): void {
+  private async validateKeyOwnership(user: JwtPayload, key: string): Promise<void> {
     // ── SYS_ADMIN can access any file
     if (user.role === UserRole.SYS_ADMIN) return;
 
-    // ── Key format: context/authId/date/filename
-    // ── Check that authId segment matches current user
+    // ── 1. FAST PRE-CHECK: String parsing
+    // Key format: context/authId/date/filename
     const segments = key.split('/');
-    const keyOwnerId = segments[1]; // Index 1 is always authId
+    const keyOwnerId = segments[1];
 
     if (keyOwnerId !== user.sub) {
+      throw new ForbiddenException('You do not have permission to access this file');
+    }
+
+    // ── 2. METADATA CHECK (Source of Truth)
+    // Prevents attackers from using custom nested paths like "general/OTHER_ID/..."
+    const metadata = await this.minioService.getFileMetadata(key);
+    
+    // Note: MinIO standardizes metadata keys to lowercase
+    if (metadata['x-uploaded-by'] !== user.sub) {
       throw new ForbiddenException('You do not have permission to access this file');
     }
   }

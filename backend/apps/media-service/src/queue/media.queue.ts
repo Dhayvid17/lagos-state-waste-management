@@ -10,9 +10,10 @@ export const MediaJobs = {
 
 // ── Job payload shapes
 export interface CompressImageJobData {
-  key: string; // MinIO object key
+  key: string;          // MinIO object key
   uploadedById: string; // authId of uploader
   mimeType: string;
+  thumbnailKey: string; // Where to store the generated thumbnail
 }
 
 export interface CompressVideoJobData {
@@ -20,6 +21,7 @@ export interface CompressVideoJobData {
   uploadedById: string;
   mimeType: string;
   originalSizeMb: number;
+  thumbnailKey: string; // Where to store the generated thumbnail
 }
 
 export interface GenerateThumbnailJobData {

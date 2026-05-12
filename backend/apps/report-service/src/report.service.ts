@@ -971,4 +971,52 @@ export class ReportService {
       return updated;
     });
   }
+
+  // ============================================================
+  // EVENT HANDLERS (from other services)
+  // ============================================================
+
+  async handleMediaProcessed(data: {
+    originalKey: string;
+    compressedKey: string;
+    thumbnailKey: string;
+    uploadedById: string;
+    mediaType: string;
+  }) {
+    this.logger.log(`Received media.processed event for ${data.originalKey}`);
+
+    // Find reports that contain the original media key
+    const reports = await this.prisma.wasteReport.findMany({
+      where: {
+        mediaUrls: {
+          has: data.originalKey,
+        },
+      },
+    });
+
+    if (reports.length === 0) {
+      this.logger.warn(`No report found containing media key: ${data.originalKey}`);
+      return;
+    }
+
+    // Update all matching reports (usually just 1)
+    for (const report of reports) {
+      // Replace the old key with the new compressed key in the array
+      const updatedMediaUrls = report.mediaUrls.map((url) =>
+        url === data.originalKey ? data.compressedKey : url,
+      );
+
+      await this.prisma.wasteReport.update({
+        where: { id: report.id },
+        data: {
+          mediaUrls: updatedMediaUrls,
+          thumbnailUrl: data.thumbnailKey, // Set the generated thumbnail
+        },
+      });
+
+      this.logger.log(
+        `Updated Report ${report.id} media URL to compressed version and set thumbnail`,
+      );
+    }
+  }
 }

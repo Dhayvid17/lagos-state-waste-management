@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { EventPattern, Payload } from '@nestjs/microservices';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import type { JwtPayload } from '@app/shared';
@@ -243,5 +244,23 @@ export class ReportController {
     @Body() dto: CompleteReportDto,
   ) {
     return this.reportService.completeReport(actor, id, dto);
+  }
+
+  // ============================================================
+  // EVENT HANDLERS
+  // ============================================================
+
+  @EventPattern('media.processed')
+  async handleMediaProcessed(
+    @Payload()
+    data: {
+      originalKey: string;
+      compressedKey: string;
+      thumbnailKey: string;
+      uploadedById: string;
+      mediaType: string;
+    },
+  ) {
+    return this.reportService.handleMediaProcessed(data);
   }
 }

@@ -3,6 +3,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { BullModule } from '@nestjs/bull';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { TerminusModule } from '@nestjs/terminus';
+import { ThrottlerModule } from '@nestjs/throttler';
 
 import mediaConfig from './config/media.config.js';
 import { MediaController } from './media.controller.js';
@@ -11,6 +13,7 @@ import { MinioService } from './minio/minio.service.js';
 import { MediaProcessor } from './queue/media.processor.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { MEDIA_QUEUE } from './queue/media.queue.js';
+import { MediaHealthController } from './health/health.controller.js';
 
 @Module({
   imports: [
@@ -18,6 +21,22 @@ import { MEDIA_QUEUE } from './queue/media.queue.js';
       isGlobal: true,
       load: [mediaConfig],
       envFilePath: ['../.env.dev', '.env.dev', '.env'],
+    }),
+
+    // Terminus Health Check
+    TerminusModule,
+
+    // Rate limiting — 10 requests per 60s
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            ttl: 60000, // 60 seconds
+            limit: config.get<number>('media.rateLimit.limit', 10),
+          },
+        ],
+      }),
     }),
 
     // JWT
@@ -65,7 +84,7 @@ import { MEDIA_QUEUE } from './queue/media.queue.js';
       },
     ]),
   ],
-  controllers: [MediaController],
+  controllers: [MediaController, MediaHealthController],
   providers: [MediaService, MinioService, MediaProcessor, JwtAuthGuard],
 })
 export class MediaModule {}

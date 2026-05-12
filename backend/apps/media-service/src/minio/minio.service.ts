@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as Minio from 'minio';
+import * as fs from 'fs';
+import { pipeline } from 'stream/promises';
 
 @Injectable()
 export class MinioService implements OnModuleInit {
@@ -36,31 +38,30 @@ export class MinioService implements OnModuleInit {
       if (!exists) {
         await this.client.makeBucket(this.bucket, 'us-east-1');
         this.logger.log(`✅ MinIO bucket created: ${this.bucket}`);
-      } else {
-        this.logger.log(`✅ MinIO bucket exists: ${this.bucket}`);
-      }
 
-      // ── Enforce private bucket policy — NO public access
-      const policy = {
-        Version: '2012-10-17',
-        Statement: [
-          {
-            Effect: 'Deny',
-            Principal: '*',
-            Action: ['s3:GetObject'],
-            Resource: [`arn:aws:s3:::${this.bucket}/*`],
-            Condition: {
-              StringNotEquals: {
-                's3:signatureversion': 'AWS4-HMAC-SHA256',
+        // ── Enforce private bucket policy — NO public access
+        const policy = {
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Effect: 'Deny',
+              Principal: '*',
+              Action: ['s3:GetObject'],
+              Resource: [`arn:aws:s3:::${this.bucket}/*`],
+              Condition: {
+                StringNotEquals: {
+                  's3:signatureversion': 'AWS4-HMAC-SHA256',
+                },
               },
             },
-          },
-        ],
-      };
+          ],
+        };
 
-      await this.client.setBucketPolicy(this.bucket, JSON.stringify(policy));
-
-      this.logger.log('🔒 Bucket policy set — private access only');
+        await this.client.setBucketPolicy(this.bucket, JSON.stringify(policy));
+        this.logger.log('🔒 Bucket policy set — private access only');
+      } else {
+        this.logger.log(`✅ MinIO bucket exists: ${this.bucket} — skipping policy update`);
+      }
     } catch (error) {
       this.logger.error('Failed to initialize MinIO bucket:', (error as Error).message);
       throw new InternalServerErrorException('Storage initialization failed');
@@ -120,6 +121,18 @@ export class MinioService implements OnModuleInit {
   }
 
   // ============================================================
+  // PING BUCKET — for health checks
+  // ============================================================
+  async ping(): Promise<boolean> {
+    try {
+      await this.client.bucketExists(this.bucket);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ============================================================
   // CHECK IF FILE EXISTS
   // ============================================================
   async fileExists(key: string): Promise<boolean> {
@@ -128,6 +141,19 @@ export class MinioService implements OnModuleInit {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  // ============================================================
+  // GET FILE METADATA
+  // ============================================================
+  async getFileMetadata(key: string): Promise<Record<string, string>> {
+    try {
+      const stat = await this.client.statObject(this.bucket, key);
+      return (stat.metaData as Record<string, string>) ?? {};
+    } catch (error) {
+      this.logger.error(`Get metadata failed for key ${key}:`, (error as Error).message);
+      throw new InternalServerErrorException('Failed to retrieve file metadata');
     }
   }
 
@@ -147,6 +173,47 @@ export class MinioService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Get buffer failed for key ${key}:`, (error as Error).message);
       throw new InternalServerErrorException('Failed to retrieve file');
+    }
+  }
+
+  // ============================================================
+  // STREAM FILE TO DISK — for large videos to prevent RAM crash
+  // ============================================================
+  async streamToFile(key: string, destPath: string): Promise<void> {
+    try {
+      const stream = await this.client.getObject(this.bucket, key);
+      const writer = fs.createWriteStream(destPath);
+      await pipeline(stream, writer);
+      this.logger.log(`Streamed to disk: ${key} -> ${destPath}`);
+    } catch (error) {
+      this.logger.error(`Stream to file failed for key ${key}:`, (error as Error).message);
+      throw new InternalServerErrorException('Failed to stream file to disk');
+    }
+  }
+
+  // ============================================================
+  // UPLOAD FILE FROM DISK — for large videos to prevent RAM crash
+  // ============================================================
+  async uploadFromFile(
+    key: string,
+    filePath: string,
+    mimeType: string,
+    metadata?: Record<string, string>,
+  ): Promise<string> {
+    try {
+      const stat = fs.statSync(filePath);
+      const readStream = fs.createReadStream(filePath);
+
+      await this.client.putObject(this.bucket, key, readStream, stat.size, {
+        'Content-Type': mimeType,
+        ...metadata,
+      });
+
+      this.logger.log(`Uploaded from disk: ${key} (${stat.size} bytes)`);
+      return key;
+    } catch (error) {
+      this.logger.error(`Upload from file failed for key ${key}:`, (error as Error).message);
+      throw new InternalServerErrorException('File upload from disk failed');
     }
   }
 }
