@@ -12,8 +12,8 @@ import {
   StrictValidationPipe,
 } from '@app/shared';
 
-import { MediaModule } from './media.module.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { MediaModule } from './media.module';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_INTERVAL = 5000;

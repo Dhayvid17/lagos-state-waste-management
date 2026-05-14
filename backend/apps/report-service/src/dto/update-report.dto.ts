@@ -4,7 +4,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
-  IsUrl,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -74,15 +74,22 @@ export class UpdateReportDto {
   @IsEnum(LagosLGA)
   lgaId?: LagosLGA;
 
-  @ApiPropertyOptional({ type: [String] })
+  @ApiPropertyOptional({ type: [String], example: ['reports/userId/2026/01/uuid.webp'] })
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsString({ each: true })
+  @Matches(/^[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-]+\/\d{4}\/\d{2}\/[a-zA-Z0-9_\-\.]+$/, {
+    each: true,
+    message: 'Each mediaUrl must be a valid MinIO object key (e.g. reports/userId/2026/01/uuid.webp)',
+  })
   mediaUrls?: string[];
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ example: 'reports/userId/2026/01/uuid-thumb.webp' })
   @IsOptional()
   @IsString()
+  @Matches(/^[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-]+\/\d{4}\/\d{2}\/[a-zA-Z0-9_\-\.]+$/, {
+    message: 'thumbnailUrl must be a valid MinIO object key',
+  })
   thumbnailUrl?: string;
 }
 
@@ -125,9 +132,13 @@ export class CompleteReportDto {
   @MaxLength(1000)
   collectorNote?: string;
 
-  @ApiPropertyOptional({ type: [String] })
+  @ApiPropertyOptional({ type: [String], example: ['reports/userId/2026/01/before.webp'] })
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsString({ each: true })
+  @Matches(/^[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-]+\/\d{4}\/\d{2}\/[a-zA-Z0-9_\-\.]+$/, {
+    each: true,
+    message: 'Each completionMediaUrl must be a valid MinIO object key',
+  })
   completionMediaUrls?: string[]; // Before/after photos
 }

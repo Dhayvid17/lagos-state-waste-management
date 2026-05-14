@@ -4,13 +4,14 @@ import { JwtModule } from '@nestjs/jwt';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TerminusModule } from '@nestjs/terminus';
 
-import userConfig from './config/user.config.js';
-import { UserController } from './user.controller.js';
-import { UserService } from './user.service.js';
-import { UserCreatedHandler } from './events/user-created.handler.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { PrismaService } from './prisma/prisma.service.js';
-import { UserHealthController } from './health/health.controller.js';
+import userConfig from './config/user.config';
+import { UserController } from './user.controller';
+import { UserService } from './user.service';
+import { UserCreatedHandler } from './events/user-created.handler';
+import { UserMessageHandler } from './events/user-message.handler';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { PrismaService } from './prisma/prisma.service';
+import { UserHealthController } from './health/health.controller';
 import Redis from 'ioredis';
 
 @Module({
@@ -48,6 +49,7 @@ import Redis from 'ioredis';
   controllers: [
     UserController,
     UserCreatedHandler,
+    UserMessageHandler,
     UserHealthController,
   ],
   providers: [
@@ -56,13 +58,21 @@ import Redis from 'ioredis';
     PrismaService,
     {
       provide: 'REDIS_CLIENT',
-      useFactory: () =>
-        new Redis({
-          host: process.env.REDIS_HOST ?? 'localhost',
-          port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-          password: process.env.REDIS_PASSWORD,
-          retryStrategy: (times) => (times > 3 ? null : times * 1000),
-        }),
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const client = new Redis({
+          host: config.get<string>('user.redis.host'),
+          port: config.get<number>('user.redis.port'),
+          password: config.get<string>('user.redis.password'),
+          // Infinite exponential backoff capped at 10s — standard for robust microservices
+          retryStrategy: (times) => Math.min(times * 500, 10000),
+        });
+
+        client.on('connect', () => console.log('User Service: Redis connected successfully'));
+        client.on('error', (err) => console.error('User Service: Redis error:', err.message));
+
+        return client;
+      },
     },
   ],
 })

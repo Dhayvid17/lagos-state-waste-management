@@ -21,8 +21,8 @@ import { memoryStorage } from 'multer';
 import type { JwtPayload } from '@app/shared';
 import { CurrentUser, Roles, UserRole } from '@app/shared';
 
-import { MediaService } from './media.service.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { MediaService } from './media.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from '@app/shared';
 
 @ApiTags('Media')
@@ -94,8 +94,8 @@ export class MediaController {
     return this.mediaService.uploadMultipleFiles(user, files, context);
   }
 
-  // ── GET /api/media/presign/:key
-  @Get('presign/:key(*)')
+  // ── GET /api/media/presign/*key
+  @Get('presign/*key')
   @ApiOperation({ summary: 'Get fresh 15-minute presigned URL for a file' })
   getPresignedUrl(@CurrentUser() user: JwtPayload, @Param('key') key: string) {
     return this.mediaService.getPresignedUrl(user, key);
@@ -109,8 +109,8 @@ export class MediaController {
     return this.mediaService.getMultiplePresignedUrls(user, body.keys);
   }
 
-  // ── DELETE /api/media/:key
-  @Delete(':key(*)')
+  // ── DELETE /api/media/*key
+  @Delete('*key')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a file from storage' })
   deleteFile(@CurrentUser() user: JwtPayload, @Param('key') key: string) {

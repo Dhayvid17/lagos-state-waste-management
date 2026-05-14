@@ -19,16 +19,18 @@ import { Request } from 'express';
 
 import { JwtPayload, NatsEvents, UserRole, UserStatus, ROLE_PERMISSIONS } from '@app/shared';
 
-import { User, UserDocument, DeviceRefreshToken } from './schemas/user.schema.js';
-import { RegisterDto } from './dto/register.dto.js';
-import { LoginDto } from './dto/login.dto.js';
+import { User, UserDocument, DeviceRefreshToken } from './schemas/user.schema';
+import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
 import {
   VerifyEmailDto,
   ForgotPasswordDto,
   ResetPasswordDto,
   ChangePasswordDto,
-} from './dto/verify-email.dto.js';
-import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
+} from './dto/verify-email.dto';
+import { TwoFactorDto } from './dto/login.dto';
+import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib';
+import { TokenBlocklistService } from './blocklist/token-blocklist.service';
 import { ClientProxy } from '@nestjs/microservices';
 
 @Injectable()
@@ -66,20 +68,23 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.password, rounds);
 
     // 4. Generate email verification token
-    const emailVerificationToken = crypto.randomBytes(32).toString('hex');
+    const rawEmailToken = crypto.randomBytes(32).toString('hex');
+    const emailVerificationToken = this.hashToken(rawEmailToken);
     const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
 
     // 5. Assign default permissions based on role
-    const role = dto.role ?? UserRole.CITIZEN;
+    // Hardcoded to CITIZEN to prevent privilege escalation
+    const role = UserRole.CITIZEN;
     const permissions = [...ROLE_PERMISSIONS[role]];
 
     // ── Start MongoDB session for atomic operation
     const session = await this.userModel.db.startSession();
+    let user: any;
 
     try {
       session.startTransaction();
       // 6. Create user
-      const [user] = await this.userModel.create(
+      const [createdUser] = await this.userModel.create(
         [
           {
             email: dto.email.toLowerCase().trim(),
@@ -96,38 +101,48 @@ export class AuthService {
         ],
         { session },
       );
+      user = createdUser;
 
-      // 7. Fire NATS event → notification-service sends verification email, if this throws, transaction rolls back
+      // 7. Commit database changes
+      await session.commitTransaction();
+      this.logger.log(`New user registered in DB: ${user.email} [${role}]`);
+    } catch (error) {
+      // ── Rollback DB if creation failed
+      await session.abortTransaction();
+      if (error instanceof ConflictException) throw error;
+      this.logger.error(`Registration DB transaction failed: ${(error as Error).message}`);
+      throw new InternalServerErrorException('Registration failed. Please try again.');
+    } finally {
+      // ── Always end session whether success or failure
+      await session.endSession();
+    }
+
+    // 8. Fire NATS event OUTSIDE transaction
+    // If this fails, the user is still created successfully.
+    try {
       await this.natsClient
         .emit(NatsEvents.USER_CREATED, {
           authId: String(user._id),
           email: user.email,
           role: user.role,
           phoneNumber: user.phoneNumber,
-          timestamp: new Date().toISOString(),
+          // TODO: Send rawEmailToken in the NATS payload so the notification-service can generate the clickable link
+          // emailVerificationToken: rawEmailToken,
         })
         .toPromise();
-
-      // 8. Both succeeded — commit
-      await session.commitTransaction();
-
-      this.logger.log(`New user registered: ${user.email} [${role}]`);
       this.logger.log(`NATS event fired: ${NatsEvents.USER_CREATED}`);
-
-      return {
-        message: 'Registration successful. Please verify your email.',
-        userId: String(user._id),
-      };
-    } catch (error) {
-      // ── Rollback everything if anything failed
-      await session.abortTransaction();
-      if (error instanceof ConflictException) throw error;
-      this.logger.error(`Registration failed and rolled back: ${(error as Error).message}`);
-      throw new InternalServerErrorException('Registration failed. Please try again.');
-    } finally {
-      // ── Always end session whether success or failure
-      await session.endSession();
+    } catch (natsError) {
+      this.logger.error(
+        `NATS emit failed after user creation — manual reconciliation may be needed: ${
+          (natsError as Error).message
+        }`,
+      );
     }
+
+    return {
+      message: 'Registration successful. Please verify your email.',
+      userId: String(user._id),
+    };
   }
 
   // ============================================================
@@ -255,8 +270,11 @@ export class AuthService {
       { $pull: { deviceRefreshTokens: { tokenHash } } },
     );
 
-    // Blacklist the access token until it naturally expires (15 mins)
-    if (accessToken) await this.tokenBlocklist.blockToken(accessToken, 15 * 60);
+    // Blacklist the access token until it naturally expires
+    if (accessToken) {
+      const ttl = this.getRemainingTtl(accessToken);
+      if (ttl > 0) await this.tokenBlocklist.blockToken(accessToken, ttl);
+    }
 
     return { message: 'Logged out successfully' };
   }
@@ -267,7 +285,10 @@ export class AuthService {
     await this.userModel.updateOne({ _id: userId }, { $set: { deviceRefreshTokens: [] } });
 
     // Blacklist current access token
-    if (accessToken) await this.tokenBlocklist.blockToken(accessToken, 15 * 60);
+    if (accessToken) {
+      const ttl = this.getRemainingTtl(accessToken);
+      if (ttl > 0) await this.tokenBlocklist.blockToken(accessToken, ttl);
+    }
 
     return { message: 'Logged out from all devices successfully' };
   }
@@ -276,9 +297,11 @@ export class AuthService {
   // EMAIL VERIFICATION
   // ============================================================
   async verifyEmail(dto: VerifyEmailDto) {
+    const hashedToken = this.hashToken(dto.token);
+
     const user = await this.userModel.findOne({
       email: dto.email.toLowerCase(),
-      emailVerificationToken: dto.token,
+      emailVerificationToken: hashedToken,
       emailVerificationExpires: { $gt: new Date() },
     });
 
@@ -380,7 +403,7 @@ export class AuthService {
   // CHANGE PASSWORD (Authenticated)
   // ============================================================
   // Change password for logged-in users, requires current password for security
-  async changePassword(userId: string, dto: ChangePasswordDto) {
+  async changePassword(userId: string, dto: ChangePasswordDto, accessToken: string) {
     const user = await this.userModel.findById(userId).select('+passwordHash');
 
     if (!user) throw new NotFoundException('User not found');
@@ -397,13 +420,76 @@ export class AuthService {
     await this.userModel.updateOne(
       { _id: userId },
       {
-        passwordHash,
-        lastPasswordChangedAt: new Date(),
-        deviceRefreshTokens: [], // Force re-login on all devices
+        $set: {
+          passwordHash,
+          lastPasswordChangedAt: new Date(),
+          deviceRefreshTokens: [], // Force re-login on all devices
+        },
       },
     );
 
-    return { message: 'Password changed successfully. Please login again.' };
+    // Blacklist the current access token
+    const ttl = this.getRemainingTtl(accessToken);
+    if (ttl > 0) await this.tokenBlocklist.blockToken(accessToken, ttl);
+
+    return { message: 'Password changed successfully' };
+  }
+
+  /**
+   * Internal method for cross-service email resolution.
+   * Pattern: 'auth.get_email'
+   */
+  async getEmailByAuthId(authId: string): Promise<string | null> {
+    try {
+      const user = await this.userModel.findById(authId).select('email').lean();
+      return user?.email ?? null;
+    } catch (error) {
+      this.logger.error(`Error resolving email for ${authId}: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  // ============================================================
+  // VERIFY 2FA
+  // ============================================================
+  async verifyTwoFactor(dto: TwoFactorDto, req: Request) {
+    let decoded: { sub: string; type: string };
+    try {
+      decoded = this.jwtService.verify(dto.tempToken, {
+        secret: this.configService.get<string>('auth.jwt.twoFactorSecret'),
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired temporary token');
+    }
+
+    if (decoded.type !== '2fa_pending') {
+      throw new UnauthorizedException('Invalid token type');
+    }
+
+    const user = await this.userModel.findById(decoded.sub).select('+twoFactorSecret');
+    if (!user) throw new NotFoundException('User not found');
+
+    if (!user.twoFactorEnabled || !user.twoFactorSecret) {
+      throw new BadRequestException('2FA is not enabled for this account');
+    }
+
+    const totp = new TOTP({
+      crypto: new NobleCryptoPlugin(),
+      base32: new ScureBase32Plugin()
+    });
+
+    try {
+      const result = await totp.verify(dto.code, { secret: user.twoFactorSecret });
+      if (!result.valid) {
+        throw new UnauthorizedException('Invalid 2FA code');
+      }
+    } catch (err) {
+      throw new UnauthorizedException('Invalid 2FA code');
+    }
+
+    const ip = req.ip ?? 'unknown';
+    const deviceName = req.headers['user-agent'] ?? 'Unknown device';
+    return this.generateTokenPair(user, ip, deviceName);
   }
 
   // ============================================================
@@ -449,13 +535,13 @@ export class AuthService {
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {
         secret: this.configService.get<string>('auth.jwt.accessSecret'),
-        expiresIn: this.configService.get<string>('auth.jwt.accessExpiry'),
+        expiresIn: this.configService.get<any>('auth.jwt.accessExpiry'),
       }),
       this.jwtService.signAsync(
         { sub: payload.sub },
         {
           secret: this.configService.get<string>('auth.jwt.refreshSecret'),
-          expiresIn: this.configService.get<string>('auth.jwt.refreshExpiry'),
+          expiresIn: this.configService.get<any>('auth.jwt.refreshExpiry'),
         },
       ),
     ]);
@@ -465,7 +551,6 @@ export class AuthService {
 
     // Create new device session object
     const newDevice: DeviceRefreshToken = {
-      tokenFamily: crypto.randomUUID(),
       tokenHash: newTokenHash,
       deviceName,
       deviceIp: ip,
@@ -514,7 +599,7 @@ export class AuthService {
     return this.jwtService.sign(
       { sub: userId, type: '2fa_pending' },
       {
-        secret: this.configService.get<string>('auth.jwt.accessSecret'),
+        secret: this.configService.get<string>('auth.jwt.twoFactorSecret'),
         expiresIn: '5m',
       },
     );
@@ -523,5 +608,17 @@ export class AuthService {
   // Hash tokens using SHA-256 before storing in DB for security
   private hashToken(token: string): string {
     return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  // Calculate remaining TTL in seconds from a JWT token's exp claim
+  private getRemainingTtl(token: string): number {
+    try {
+      const decoded = this.jwtService.decode(token) as { exp?: number };
+      if (!decoded?.exp) return 15 * 60; // fallback to 15m if no exp claim
+      const remaining = decoded.exp - Math.floor(Date.now() / 1000);
+      return remaining > 0 ? remaining : 0;
+    } catch {
+      return 15 * 60; // fallback on error
+    }
   }
 }

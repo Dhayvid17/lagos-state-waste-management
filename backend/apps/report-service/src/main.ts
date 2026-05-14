@@ -13,8 +13,8 @@ import {
   StrictValidationPipe,
 } from '@app/shared';
 
-import { ReportModule } from './report.module.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { ReportModule } from './report.module';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_INTERVAL = 5000;
@@ -73,9 +73,21 @@ async function bootstrap(retryCount = 0) {
       logger.log(`📚 Swagger: http://localhost:${port}/api/reports/docs`);
     }
 
+    // ── Connect NATS microservice transport (hybrid app)
+    app.connectMicroservice<MicroserviceOptions>({
+      transport: Transport.NATS,
+      options: {
+        servers: [config.get<string>('report.nats.url') ?? 'nats://localhost:4222'],
+        queue: 'report-service',
+      },
+    });
+
+    // Start NATS listener BEFORE HTTP so events can be received immediately
+    await app.startAllMicroservices();
     await app.listen(port);
 
     logger.log(`🚀 Report Service running on http://localhost:${port}/api`);
+    logger.log(`📡 NATS microservice connected — listening for events`);
     logger.log(`🌍 Environment: ${process.env.NODE_ENV ?? 'dev'}`);
     logger.log(`📍 Geospatial duplicate detection active (50m radius)`);
     logger.log(`⚡ Rate limiting active (10 reports/hour per citizen)`);

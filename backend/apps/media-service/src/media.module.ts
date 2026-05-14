@@ -6,14 +6,14 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TerminusModule } from '@nestjs/terminus';
 import { ThrottlerModule } from '@nestjs/throttler';
 
-import mediaConfig from './config/media.config.js';
-import { MediaController } from './media.controller.js';
-import { MediaService } from './media.service.js';
-import { MinioService } from './minio/minio.service.js';
-import { MediaProcessor } from './queue/media.processor.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { MEDIA_QUEUE } from './queue/media.queue.js';
-import { MediaHealthController } from './health/health.controller.js';
+import mediaConfig from './config/media.config';
+import { MediaController } from './media.controller';
+import { MediaService } from './media.service';
+import { MinioService } from './minio/minio.service';
+import { MediaProcessor } from './queue/media.processor';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { MEDIA_QUEUE } from './queue/media.queue';
+import { MediaHealthController } from './health/health.controller';
 
 @Module({
   imports: [

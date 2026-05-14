@@ -4,7 +4,6 @@ export const MEDIA_QUEUE = 'media-processing';
 export const MediaJobs = {
   COMPRESS_IMAGE: 'compress-image',
   COMPRESS_VIDEO: 'compress-video',
-  GENERATE_THUMBNAIL: 'generate-thumbnail',
   DELETE_FILE: 'delete-file',
 } as const;
 
@@ -24,13 +23,9 @@ export interface CompressVideoJobData {
   thumbnailKey: string; // Where to store the generated thumbnail
 }
 
-export interface GenerateThumbnailJobData {
-  sourceKey: string; // Original file key
-  thumbnailKey: string; // Where to store thumbnail
-  mediaType: 'image' | 'video';
-}
 
 export interface DeleteFileJobData {
   key: string;
   deletedById: string;
+  thumbnailKey?: string; // Optional — if provided, processor skips "guessing" logic
 }

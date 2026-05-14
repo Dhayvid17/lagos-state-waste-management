@@ -8,10 +8,13 @@ import {
 } from '@nestjs/common';
 // PrismaClient is handled by PrismaService which extends it
 import { JwtPayload, LagosLGA, PaginatedResponse, UserRole } from '@app/shared';
-import { CreateProfileDto } from './dto/create-profile.dto.js';
-import type { UpdateProfileDto, UpdateLocationDto } from './dto/update-profile.dto.js';
-import { PrismaService } from './prisma/prisma.service.js';
+import { CreateProfileDto } from './dto/create-profile.dto';
+import type { UpdateProfileDto, UpdateLocationDto } from './dto/update-profile.dto';
+import { PrismaService } from './prisma/prisma.service';
+import { UserProfile } from './generated/prisma/client';
 import type Redis from 'ioredis';
+import { ClientProxy } from '@nestjs/microservices';
+import { firstValueFrom, timeout } from 'rxjs';
 
 @Injectable()
 export class UserService {
@@ -20,6 +23,8 @@ export class UserService {
     private readonly prisma: PrismaService,
     @Inject('REDIS_CLIENT')
     private readonly redis: Redis,
+    @Inject('NATS_SERVICE')
+    private readonly natsClient: ClientProxy,
   ) {}
 
   // ============================================================
@@ -40,8 +45,8 @@ export class UserService {
     const profile = await this.prisma.userProfile.create({
       data: {
         authId: payload.authId,
-        firstName: '', // Empty — user fills via PATCH /users/me
-        lastName: '', // Empty — user fills via PATCH /users/me
+        firstName: null, // Scaffolding: user fills via profile completion
+        lastName: null, // Scaffolding: user fills via profile completion
         phoneNumber: payload.phoneNumber ?? null,
         metadata: { registeredAt: payload.timestamp },
       },
@@ -113,8 +118,8 @@ export class UserService {
       where: { id: profileId },
       select: {
         id: true,
-        firstName: true,
-        lastName: true,
+        firstName: true, // Note: Can be null if profile is not yet completed
+        lastName: true, // Note: Can be null if profile is not yet completed
         avatarUrl: true,
         bio: true,
         lgaId: true,
@@ -159,6 +164,11 @@ export class UserService {
     limit: number = 20,
     lgaId?: LagosLGA,
   ): Promise<PaginatedResponse> {
+    // ── Defensive checks (Never trust the controller)
+    if (!Number.isInteger(page) || page < 1) page = 1;
+    if (!Number.isInteger(limit) || limit < 1) limit = 20;
+    if (limit > 100) limit = 100;
+
     if (user.role !== UserRole.SYS_ADMIN && user.role !== UserRole.AGENCY_ADMIN) {
       throw new ForbiddenException('Insufficient permissions');
     }
@@ -211,6 +221,8 @@ export class UserService {
     profileId: string,
     status: 'VERIFIED' | 'REJECTED',
     reason?: string,
+    ip?: string,
+    userAgent?: string,
   ) {
     if (actor.role !== UserRole.AGENCY_ADMIN && actor.role !== UserRole.SYS_ADMIN) {
       throw new ForbiddenException('Only Agency Admins can verify KYC');
@@ -258,6 +270,8 @@ export class UserService {
           action: `KYC_${status}`,
           targetId: profileId,
           targetType: 'USER_PROFILE',
+          ipAddress: ip ?? null,
+          userAgent: userAgent ?? null,
           metadata: { reason: reason ?? null },
         },
       });
@@ -318,6 +332,67 @@ export class UserService {
   }
 
   // ============================================================
+  // NATS MESSAGE HANDLERS — Logic for cross-service requests
+  // ============================================================
+
+  /**
+   * Internal method called via NATS to resolve contact info for notifications.
+   * Pattern: 'user.get_contact'
+   */
+  async getContactInfo(authId: string) {
+    const profile = await this.prisma.userProfile.findUnique({
+      where: { authId },
+      select: { phoneNumber: true, fcmTokens: true },
+    });
+
+    if (!profile) return null;
+
+    // ── Rule 14: Data Fragmentation Resolve
+    // The email is stored in auth-service (MongoDB), while profile is here in postgres.
+    // We must ask auth-service for the email.
+    let email = '';
+    try {
+      email = await firstValueFrom(
+        this.natsClient.send('auth.get_email', { authId }).pipe(timeout(3000)),
+      );
+    } catch (error) {
+      this.logger.error(`Failed to resolve email from auth-service: ${(error as Error).message}`);
+    }
+
+    return {
+      email: email || '',
+      phoneNumber: profile.phoneNumber,
+      fcmTokens: profile.fcmTokens,
+    };
+  }
+
+  /**
+   * Internal method called via NATS to remove invalid FCM tokens in batch.
+   */
+  async handleRemoveFcmTokens(authId: string, tokens: string[]) {
+    this.logger.log(`Removing ${tokens.length} invalid FCM tokens for user ${authId}`);
+    try {
+      const profile = await this.prisma.userProfile.findUnique({
+        where: { authId },
+        select: { fcmTokens: true },
+      });
+
+      if (!profile) return;
+
+      await this.prisma.userProfile.update({
+        where: { authId },
+        data: {
+          fcmTokens: {
+            set: profile.fcmTokens.filter((t) => !tokens.includes(t)),
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.error(`Failed to remove tokens for ${authId}: ${(error as Error).message}`);
+    }
+  }
+
+  // ============================================================
   // UPDATE LOCATION
   // ============================================================
   async updateLocation(user: JwtPayload, dto: UpdateLocationDto) {
@@ -335,8 +410,8 @@ export class UserService {
   // ============================================================
   // PRIVATE HELPERS
   // ============================================================
-  private calculateCompleteness(profile: any): number {
-    const fields = [
+  private calculateCompleteness(profile: UserProfile): number {
+    const fields: (keyof UserProfile)[] = [
       'firstName',
       'lastName',
       'avatarUrl',
@@ -349,7 +424,11 @@ export class UserService {
       'city',
     ];
 
-    const filled = fields.filter((f) => profile[f] !== null && profile[f] !== '').length;
+    const filled = fields.filter((f) => {
+      const val = profile[f];
+      return val !== null && val !== undefined && val !== '';
+    }).length;
+    
     return Math.round((filled / fields.length) * 100);
   }
 }

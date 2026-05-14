@@ -11,8 +11,8 @@ import {
   StrictValidationPipe,
 } from '@app/shared';
 
-import { AuthModule } from './auth.module.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { AuthModule } from './auth.module';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 // ============================================================
 // CONSTANTS

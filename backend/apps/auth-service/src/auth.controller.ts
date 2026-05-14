@@ -8,7 +8,9 @@ import {
   Req,
   Res,
   UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { MessagePattern, Payload } from '@nestjs/microservices';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
@@ -16,10 +18,10 @@ import { CurrentUser, Public } from '@app/shared';
 
 import type { JwtPayload } from '@app/shared';
 
-import { AuthService } from './auth.service.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { RegisterDto } from './dto/register.dto.js';
-import { LoginDto } from './dto/login.dto.js';
+import { AuthService } from './auth.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RegisterDto } from './dto/register.dto';
+import { LoginDto, TwoFactorDto } from './dto/login.dto';
 import {
   VerifyEmailDto,
   ForgotPasswordDto,
@@ -69,6 +71,32 @@ export class AuthController {
     return result;
   }
 
+  // ── POST /auth/verify-2fa
+  @Public()
+  @Post('verify-2fa')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify 2FA code to complete login' })
+  async verifyTwoFactor(
+    @Body() dto: TwoFactorDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.verifyTwoFactor(dto, req);
+
+    // Set refresh token as httpOnly cookie for web clients
+    if ('refreshToken' in result) {
+      res.cookie('refresh_token', result.refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'prod',
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        path: '/api/auth/refresh',
+      });
+    }
+
+    return result;
+  }
+
   // ── POST /auth/refresh
   @Public()
   @Post('refresh')
@@ -79,7 +107,7 @@ export class AuthController {
     const rawToken = req.cookies?.refresh_token ?? req.body?.refreshToken;
 
     if (!rawToken) {
-      throw new Error('No refresh token provided');
+      throw new UnauthorizedException('No refresh token provided');
     }
 
     // ── Cryptographically verify the refresh token before trusting its payload
@@ -88,7 +116,7 @@ export class AuthController {
     try {
       decoded = this.authService.verifyRefreshToken(rawToken);
     } catch {
-      throw new Error('Invalid or expired refresh token');
+      throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
     // Call auth service to validate refresh token, generate new tokens, and rotate refresh token in DB
@@ -124,8 +152,8 @@ export class AuthController {
     // Extract access token from Authorization header and refresh token from cookie/body for logout
     const accessToken = req.headers.authorization?.split(' ')[1] ?? '';
     const rawToken = req.cookies?.refresh_token ?? req.body?.refreshToken;
-    if (!rawToken) throw new Error('No refresh token provided');
-    if (!accessToken) throw new Error('No access token provided');
+    if (!rawToken) throw new UnauthorizedException('No refresh token provided');
+    if (!accessToken) throw new UnauthorizedException('No access token provided');
 
     res.clearCookie('refresh_token', { path: '/api/auth/refresh' });
     return this.authService.logout(user.sub, rawToken, accessToken);
@@ -136,10 +164,14 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Logout from all devices' })
   @ApiBearerAuth()
-  async logoutAll(@CurrentUser() user: JwtPayload, @Res({ passthrough: true }) res: Response) {
+  async logoutAll(
+    @CurrentUser() user: JwtPayload,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     // Extract access token from Authorization header to blacklist it along with all refresh tokens
-    const accessToken = res.req?.headers.authorization?.split(' ')[1] ?? '';
-    if (!accessToken) throw new Error('No access token provided');
+    const accessToken = req.headers.authorization?.split(' ')[1] ?? '';
+    if (!accessToken) throw new UnauthorizedException('No access token provided');
 
     res.clearCookie('refresh_token', { path: '/api/auth/refresh' });
     return this.authService.logoutAllDevices(user.sub, accessToken);
@@ -177,8 +209,21 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Change password (authenticated)' })
   @ApiBearerAuth()
-  changePassword(@CurrentUser() user: JwtPayload, @Body() dto: ChangePasswordDto) {
-    return this.authService.changePassword(user.sub, dto);
+  changePassword(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ChangePasswordDto,
+    @Req() req: Request,
+  ) {
+    const accessToken = req.headers.authorization?.split(' ')[1] ?? '';
+    return this.authService.changePassword(user.sub, dto, accessToken);
+  }
+
+  // ============================================================
+  // INTERNAL CROSS-SERVICE COMMUNICATION
+  // ============================================================
+  @MessagePattern('auth.get_email')
+  async handleGetEmail(@Payload() data: { authId: string }) {
+    return this.authService.getEmailByAuthId(data.authId);
   }
 
   // ── GET /auth/me

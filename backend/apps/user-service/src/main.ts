@@ -13,8 +13,8 @@ import {
   StrictValidationPipe,
 } from '@app/shared';
 
-import { UserModule } from './user.module.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { UserModule } from './user.module';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_INTERVAL = 5000;
@@ -55,7 +55,8 @@ async function bootstrap(retryCount = 0) {
 
     // ── Apply JWT auth guard globally, except for routes marked with @Public()
     const reflector = app.get(Reflector);
-    app.useGlobalGuards(new JwtAuthGuard(app.get(JwtService), config, reflector));
+    const redisClient = app.get('REDIS_CLIENT');
+    app.useGlobalGuards(new JwtAuthGuard(app.get(JwtService), config, reflector, redisClient));
 
     app.setGlobalPrefix('api');
 

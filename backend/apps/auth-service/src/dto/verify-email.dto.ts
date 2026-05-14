@@ -1,5 +1,6 @@
 import { IsNotEmpty, IsString, IsEmail } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { StrongPassword } from '@app/shared';
 
 export class VerifyEmailDto {
   @ApiProperty()
@@ -26,9 +27,8 @@ export class ResetPasswordDto {
   @IsNotEmpty()
   token: string;
 
-  @ApiProperty()
-  @IsString()
-  @IsNotEmpty()
+  @ApiProperty({ example: 'NewStr0ng!Pass' })
+  @StrongPassword()
   newPassword: string;
 }
 
@@ -38,8 +38,7 @@ export class ChangePasswordDto {
   @IsNotEmpty()
   currentPassword: string;
 
-  @ApiProperty()
-  @IsString()
-  @IsNotEmpty()
+  @ApiProperty({ example: 'NewStr0ng!Pass' })
+  @StrongPassword()
   newPassword: string;
 }

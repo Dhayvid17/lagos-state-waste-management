@@ -68,8 +68,8 @@ model UserProfile {
   // ----------------------------------------------------------
   // PERSONAL INFORMATION
   // ----------------------------------------------------------
-  firstName  String
-  lastName   String
+  firstName  String?
+  lastName   String?
   middleName String?
   avatarUrl  String?
   bio        String?  @db.VarChar(500)

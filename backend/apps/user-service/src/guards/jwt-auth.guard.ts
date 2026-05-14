@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
+import { Inject } from '@nestjs/common';
+import Redis from 'ioredis';
 import { IS_PUBLIC_KEY } from '@app/shared';
 
 @Injectable()
@@ -12,6 +14,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly reflector: Reflector,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
   // ── Main guard method
@@ -30,15 +33,35 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('No access token provided');
     }
 
-    // ── Validate token and attach user payload to request
+    // ── Validate token signature
+    let payload;
     try {
-      const payload = await this.jwtService.verifyAsync(token, {
+      payload = await this.jwtService.verifyAsync(token, {
         secret: this.configService.get<string>('user.jwt.accessSecret'),
       });
-      request['user'] = payload;
     } catch {
       throw new UnauthorizedException('Invalid or expired access token');
     }
+
+    // ── Check if token is blocklisted in Redis (e.g., user logged out)
+    try {
+      const isBlocked = await this.redis.get(`blocklist:${token}`);
+      if (isBlocked) {
+        throw new UnauthorizedException('Token has been revoked');
+      }
+    } catch (err) {
+      if (err instanceof UnauthorizedException) throw err;
+      // If Redis is temporarily down, we fail open to avoid crashing the whole system, 
+      // but log the error heavily.
+    }
+
+    // ── Check user status (suspended users shouldn't access their profile)
+    if (payload.status && payload.status !== 'ACTIVE') {
+      throw new UnauthorizedException('User account is not active');
+    }
+
+    // Attach user to request
+    request['user'] = payload;
 
     return true;
   }

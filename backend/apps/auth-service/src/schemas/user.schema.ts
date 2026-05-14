@@ -4,7 +4,6 @@ import { UserRole, UserStatus } from '@app/shared';
 
 // ── Sub-document: one active device session
 export interface DeviceRefreshToken {
-  tokenFamily: string; // Unique family ID per device login
   tokenHash: string; // Hashed refresh token (never store raw)
   deviceName: string; // e.g. "Chrome on Windows"
   deviceIp: string;
@@ -157,7 +156,6 @@ export class User {
   @Prop({
     type: [
       {
-        tokenFamily: { type: String, required: true },
         tokenHash: { type: String, required: true, select: false },
         deviceName: { type: String, default: 'Unknown device' },
         deviceIp: { type: String, required: true },
@@ -200,7 +198,10 @@ export const UserSchema = SchemaFactory.createForClass(User);
 UserSchema.index({ createdAt: -1 });
 UserSchema.index({ 'deviceRefreshTokens.tokenFamily': 1 }); // Fast device lookup
 UserSchema.index({ accountLockedUntil: 1 }); // TTL cleanup queries
-UserSchema.index({ 'deviceRefreshTokens.expiresAt': 1 }, { expireAfterSeconds: 0 }); // Auto-remove expired device sessions — MongoDB handles this natively with a TTL index on the expiresAt field. We just need to ensure that expired tokens are cleaned up regularly (e.g. via a daily cron job) to prevent database bloat.
+
+// ── WARNING: Do NOT add a TTL index for deviceRefreshTokens.expiresAt
+// MongoDB TTL indexes do not work on array subdocuments. It either does nothing 
+// or deletes the ENTIRE User document. We use a nightly Cron job to $pull expired tokens instead.
 
 // ============================================================
 // JSON CLEANUP

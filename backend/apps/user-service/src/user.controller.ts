@@ -10,20 +10,22 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Request } from 'express';
 
 import { CurrentUser, LagosLGA, Roles, UserRole } from '@app/shared';
 import type { JwtPayload } from '@app/shared';
 
-import { UserService } from './user.service.js';
-import { UpdateProfileDto, AddFcmTokenDto, UpdateLocationDto } from './dto/update-profile.dto.js';
+import { UserService } from './user.service';
+import { UpdateProfileDto, AddFcmTokenDto, UpdateLocationDto } from './dto/update-profile.dto';
 
 // ── Guard imported from auth-service via shared pattern
 // In real microservices this would be a shared guard
 // For now user-service validates JWT independently
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from '@app/shared';
 
 @ApiTags('Users')
@@ -87,7 +89,10 @@ export class UserController {
     @Query('limit') limit: string = '20',
     @Query('lgaId') lgaId?: LagosLGA,
   ) {
-    return this.userService.getAllUsers(user, parseInt(page, 10), parseInt(limit, 10), lgaId);
+    const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+
+    return this.userService.getAllUsers(user, parsedPage, parsedLimit, lgaId);
   }
 
   // ── PATCH /api/users/:id/kyc
@@ -98,7 +103,17 @@ export class UserController {
     @CurrentUser() actor: JwtPayload,
     @Param('id') profileId: string,
     @Body() body: { status: 'VERIFIED' | 'REJECTED'; reason?: string },
+    @Req() req: Request,
   ) {
-    return this.userService.updateKycStatus(actor, profileId, body.status, body.reason);
+    const ip = req.ip ?? req.headers['x-forwarded-for']?.toString() ?? undefined;
+    const userAgent = req.headers['user-agent'] ?? undefined;
+    return this.userService.updateKycStatus(
+      actor,
+      profileId,
+      body.status,
+      body.reason,
+      ip,
+      userAgent,
+    );
   }
 }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import * as crypto from 'crypto';
 
 @Injectable()
 // Service for managing a blocklist of revoked JWTs using Redis
@@ -14,14 +15,8 @@ export class TokenBlocklistService {
       host: this.configService.get<string>('auth.redis.host'),
       port: this.configService.get<number>('auth.redis.port'),
       password: this.configService.get<string>('auth.redis.password'),
-      // ── Retry strategy — don't spam errors forever
-      retryStrategy: (times) => {
-        if (times > 3) {
-          this.logger.error('Redis max retries reached. Blocklist unavailable.');
-          return null; // Stop retrying
-        }
-        return Math.min(times * 1000, 3000); // Wait 1s, 2s, 3s between retries
-      },
+      // ── Retry strategy — backoff forever with 10s cap
+      retryStrategy: (times) => Math.min(times * 500, 10000),
       lazyConnect: true, // ← Don't connect until first command
     });
 
@@ -34,7 +29,7 @@ export class TokenBlocklistService {
   // ── Add token to blocklist with TTL matching token expiry
   async blockToken(token: string, expiresInSeconds: number): Promise<void> {
     try {
-      const key = `blocklist:${token}`;
+      const key = this.toKey(token);
       await this.redis.set(key, '1', 'EX', expiresInSeconds);
       this.logger.log(`Token blacklisted for ${expiresInSeconds}s`);
     } catch (err) {
@@ -46,7 +41,7 @@ export class TokenBlocklistService {
   // ── Check if token is blocked
   async isBlocked(token: string): Promise<boolean> {
     try {
-      const key = `blocklist:${token}`;
+      const key = this.toKey(token);
       const result = await this.redis.get(key);
       return result !== null;
     } catch (err) {
@@ -54,5 +49,11 @@ export class TokenBlocklistService {
       this.logger.error('Failed to check blocklist:', (err as Error).message);
       return false;
     }
+  }
+
+  // ── Hash the token to save Redis memory
+  private toKey(token: string): string {
+    const hash = crypto.createHash('sha256').update(token).digest('hex');
+    return `blocklist:${hash}`;
   }
 }

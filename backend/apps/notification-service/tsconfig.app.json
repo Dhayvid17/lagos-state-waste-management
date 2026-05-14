@@ -1,9 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "../../",
-    "outDir": "../../dist/apps/notification-service",
-    "baseUrl": "../../"
+    "outDir": "../../dist/apps/notification-service"
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]

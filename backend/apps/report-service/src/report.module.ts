@@ -5,12 +5,13 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TerminusModule } from '@nestjs/terminus';
 import Redis from 'ioredis';
 
-import reportConfig from './config/report.config.js';
-import { ReportController } from './report.controller.js';
-import { ReportService } from './report.service.js';
-import { PrismaService } from './prisma/prisma.service.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { ReportHealthController } from './health/health.controller.js';
+import reportConfig from './config/report.config';
+import { ReportController } from './report.controller';
+import { ReportService } from './report.service';
+import { PrismaService } from './prisma/prisma.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { ReportHealthController } from './health/health.controller';
+import { MediaProcessedHandler } from './events/media-processed.handler';
 
 @Module({
   imports: [
@@ -44,7 +45,7 @@ import { ReportHealthController } from './health/health.controller.js';
     ]),
     TerminusModule,
   ],
-  controllers: [ReportController, ReportHealthController],
+  controllers: [ReportController, ReportHealthController, MediaProcessedHandler],
   providers: [
     ReportService,
     PrismaService,
@@ -53,12 +54,13 @@ import { ReportHealthController } from './health/health.controller.js';
     // Redis — rate limiting + duplicate detection
     {
       provide: 'REDIS_CLIENT',
-      useFactory: () =>
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
         new Redis({
-          host: process.env.REDIS_HOST ?? 'localhost',
-          port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-          password: process.env.REDIS_PASSWORD,
-          retryStrategy: (times) => (times > 3 ? null : times * 1000),
+          host: config.get<string>('report.redis.host') ?? 'localhost',
+          port: config.get<number>('report.redis.port') ?? 6379,
+          password: config.get<string>('report.redis.password'),
+          retryStrategy: (times) => Math.min(times * 500, 10000), // Permanent backoff
         }),
     },
   ],

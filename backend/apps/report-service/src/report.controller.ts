@@ -11,14 +11,13 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { EventPattern, Payload } from '@nestjs/microservices';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import type { JwtPayload } from '@app/shared';
 import { CurrentUser, LagosLGA, Roles, UserRole, ReportStatus, WasteType } from '@app/shared';
 
-import { ReportService } from './report.service.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { ReportService } from './report.service';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from '@app/shared';
 import { CreateReportDto } from './dto/create-report.dto.js';
 import {
@@ -246,21 +245,4 @@ export class ReportController {
     return this.reportService.completeReport(actor, id, dto);
   }
 
-  // ============================================================
-  // EVENT HANDLERS
-  // ============================================================
-
-  @EventPattern('media.processed')
-  async handleMediaProcessed(
-    @Payload()
-    data: {
-      originalKey: string;
-      compressedKey: string;
-      thumbnailKey: string;
-      uploadedById: string;
-      mediaType: string;
-    },
-  ) {
-    return this.reportService.handleMediaProcessed(data);
-  }
 }

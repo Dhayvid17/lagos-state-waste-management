@@ -14,8 +14,8 @@ import { fileTypeFromBuffer } from 'file-type';
 import type { JwtPayload } from '@app/shared';
 import { UserRole } from '@app/shared';
 
-import { MinioService } from './minio/minio.service.js';
-import { MEDIA_QUEUE, MediaJobs } from './queue/media.queue.js';
+import { MinioService } from './minio/minio.service';
+import { MEDIA_QUEUE, MediaJobs } from './queue/media.queue';
 
 // ── Supported file categories
 export type MediaType = 'image' | 'video';
@@ -168,12 +168,12 @@ export class MediaService {
     user: JwtPayload,
     key: string,
   ): Promise<{ key: string; presignedUrl: string; expiresInSeconds: number }> {
-    // ── Validate key belongs to this user OR user is admin
-    await this.validateKeyOwnership(user, key);
-
-    // ── Check file exists
+    // ── Check file exists FIRST to avoid 500 error on metadata fetch
     const exists = await this.minioService.fileExists(key);
     if (!exists) throw new NotFoundException('Media file not found');
+
+    // ── Validate key belongs to this user OR user is admin
+    await this.validateKeyOwnership(user, key);
 
     const presignedUrl = await this.minioService.getPresignedUrl(key);
     const expiresInSeconds = this.configService.get<number>('media.minio.presignExpiry')!;
@@ -212,21 +212,18 @@ export class MediaService {
   // ============================================================
   // DELETE FILE
   // ============================================================
-  async deleteFile(user: JwtPayload, key: string): Promise<{ message: string }> {
-    // ── Validate ownership securely
+  async deleteFile(
+    user: JwtPayload,
+    key: string,
+    thumbnailKey?: string,
+  ): Promise<{ message: string }> {
+    // ── Ownership check now includes existence check
     await this.validateKeyOwnership(user, key);
 
-    // ── Check file exists
-    const exists = await this.minioService.fileExists(key);
-    if (!exists) throw new NotFoundException('Media file not found');
-
     // ── Queue background deletion
-    // We replaced inline deletion with a queued job. This prevents the API from 
-    // blocking on I/O, ensuring a fast response time for the client, and allows 
-    // BullMQ to automatically retry if MinIO is temporarily unreachable.
     await this.mediaQueue.add(
       MediaJobs.DELETE_FILE,
-      { key, deletedById: user.sub },
+      { key, deletedById: user.sub, thumbnailKey },
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -236,7 +233,7 @@ export class MediaService {
     );
 
     this.logger.log(`Delete job queued for: ${key} by ${user.sub}`);
-    return { message: 'File deletion queued successfully' };
+    return { message: 'File deleted successfully' };
   }
 
   // ============================================================
@@ -338,16 +335,24 @@ export class MediaService {
     // ── 1. FAST PRE-CHECK: String parsing
     // Key format: context/authId/date/filename
     const segments = key.split('/');
-    const keyOwnerId = segments[1];
+    if (segments.length < 2) {
+      throw new BadRequestException('Invalid media key format');
+    }
 
+    const keyOwnerId = segments[1];
     if (keyOwnerId !== user.sub) {
       throw new ForbiddenException('You do not have permission to access this file');
     }
 
-    // ── 2. METADATA CHECK (Source of Truth)
-    // Prevents attackers from using custom nested paths like "general/OTHER_ID/..."
+    // ── 2. EXISTENCE CHECK (Prevent 500 in metadata fetch)
+    const exists = await this.minioService.fileExists(key);
+    if (!exists) {
+      throw new NotFoundException('Media file not found');
+    }
+
+    // ── 3. METADATA CHECK (Source of Truth)
     const metadata = await this.minioService.getFileMetadata(key);
-    
+
     // Note: MinIO standardizes metadata keys to lowercase
     if (metadata['x-uploaded-by'] !== user.sub) {
       throw new ForbiddenException('You do not have permission to access this file');

@@ -27,6 +27,11 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
 
     this.redis.on('connect', () => this.logger.log('ThrottlerStorage: Redis connected'));
     this.redis.on('error', (err) => this.logger.error('ThrottlerStorage: Redis error', err.message));
+
+    // Explicitly connect to resolve lazyConnect latency on the first incoming request
+    this.redis.connect().catch((err) => 
+      this.logger.error('ThrottlerStorage: Failed to connect to Redis', err.message)
+    );
   }
 
   async increment(key: string, ttl: number): Promise<{ totalHits: number; timeToExpire: number; isBlocked: boolean; timeToBlockExpire: number }> {
@@ -41,8 +46,9 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
     let pttlValue = (results?.[1]?.[1] as number) ?? -1;
 
     // Set TTL only on the first increment (when the key is brand new)
+    // NX flag ensures atomic operation, preventing race conditions if concurrent requests see pttlValue === -1
     if (pttlValue === -1) {
-      await this.redis.pexpire(redisKey, ttl);
+      await this.redis.call('PEXPIRE', redisKey, ttl, 'NX');
       pttlValue = ttl;
     }
 

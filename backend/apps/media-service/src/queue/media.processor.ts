@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 
-import { MinioService } from '../minio/minio.service.js';
+import { MinioService } from '../minio/minio.service';
 import {
   MEDIA_QUEUE,
   MediaJobs,
@@ -219,13 +219,15 @@ export class MediaProcessor {
       }
 
       // 3. Derive and delete thumbnail (if it exists)
-      //    We replace the extension with -thumb.webp (which is how we generated it)
-      const thumbnailKey = key.replace(/(\.[^.]+)$/, '-thumb.webp');
-      const thumbExists = await this.minioService.fileExists(thumbnailKey);
+      // Use provided thumbnailKey OR fallback to derivation logic
+      const finalThumbnailKey = job.data.thumbnailKey || 
+        key.replace(/-compressed\.[^.]+$/, '-thumb.webp').replace(/\.[^.]+$/, '-thumb.webp');
+      
+      const thumbExists = await this.minioService.fileExists(finalThumbnailKey);
       
       if (thumbExists) {
-        await this.minioService.deleteFile(thumbnailKey);
-        this.logger.log(`Deleted associated thumbnail: ${thumbnailKey}`);
+        await this.minioService.deleteFile(finalThumbnailKey);
+        this.logger.log(`Deleted associated thumbnail: ${finalThumbnailKey}`);
       }
 
       this.logger.log(`File deletion completed for: ${key}`);

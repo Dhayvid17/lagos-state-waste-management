@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { Permission, UserRole } from '../enums/index.js';
@@ -30,7 +30,7 @@ export class RolesGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>();
     const user = request.user as JwtPayload;
 
-    if (!user) throw new ForbiddenException('No user found in request');
+    if (!user) throw new UnauthorizedException('Authentication required');
 
     // SYS_ADMIN bypasses all checks
     if (user.role === UserRole.SYS_ADMIN) return true;

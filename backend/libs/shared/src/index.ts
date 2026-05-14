@@ -25,3 +25,6 @@ export * from './guards/index.js';
 
 // Pipes
 export * from './pipes/index.js';
+
+// Validators
+export * from './validators/index.js';

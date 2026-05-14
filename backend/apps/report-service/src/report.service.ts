@@ -19,8 +19,8 @@ import {
 } from '@app/shared';
 import type Redis from 'ioredis';
 
-import { PrismaService } from './prisma/prisma.service.js';
-import type { CreateReportDto } from './dto/create-report.dto.js';
+import { PrismaService } from './prisma/prisma.service';
+import type { CreateReportDto } from './dto/create-report.dto';
 import type {
   AssignCollectorDto,
   CancelReportDto,
@@ -51,19 +51,22 @@ export class ReportService {
     // ── 2. Duplicate detection — check within 50m radius
     const duplicate = await this.findNearbyReport(dto.latitude, dto.longitude, dto.lgaId);
 
-    // ── 3. Fetch points config for this waste type
+    // ── 3. Fetch points config — fallback to 0 points if missing or inactive to ensure system availability
     const pointsConfig = await this.prisma.rewardPointsConfig.findUnique({
       where: { wasteType: dto.wasteType },
     });
 
     if (!pointsConfig || !pointsConfig.isActive) {
-      throw new BadRequestException(`No points config found for waste type: ${dto.wasteType}`);
+      this.logger.warn(
+        `No active points config found for waste type: ${dto.wasteType} — awarding 0 points for report`,
+      );
     }
 
-    // ── 4. Calculate points with multipliers
-    const basePoints = pointsConfig.basePoints;
+    // ── 4. Calculate points with multipliers (safe null/inactive handling)
+    const basePoints = pointsConfig?.isActive ? pointsConfig.basePoints : 0;
     const isFirstToday = await this.isFirstReportToday(user.sub);
-    const multiplier = isFirstToday ? pointsConfig.firstReportOfDayMultiplier : 1.0;
+    const multiplier =
+      pointsConfig?.isActive && isFirstToday ? pointsConfig.firstReportOfDayMultiplier : 1.0;
     const estimatedPoints = Math.round(basePoints * multiplier);
 
     // ── 5. Create report + initial status history in transaction
@@ -144,6 +147,10 @@ export class ReportService {
     limit: number = 20,
     status?: ReportStatus,
   ) {
+    // ── Pagination guards
+    page = !Number.isInteger(page) || page < 1 ? 1 : page;
+    limit = !Number.isInteger(limit) || limit < 1 ? 20 : Math.min(limit, 100);
+
     const skip = (page - 1) * limit;
     const where: any = { reporterAuthId: user.sub };
     if (status) where.status = status;
@@ -178,6 +185,13 @@ export class ReportService {
       page,
       limit,
       totalPages: Math.ceil(total / limit),
+      // ── MEDIA PRESIGN CONTRACT
+      // mediaUrls / thumbnailUrl in each record are MinIO object keys, NOT presigned URLs.
+      // At Lagos scale, presigning N keys per request on the server would add a blocking
+      // NATS round-trip per report and is NOT acceptable for paginated list endpoints.
+      // Frontend: collect all keys from the response, then call:
+      //   GET /api/media/presign?keys[]=key1&keys[]=key2&...
+      // to get a single batch of presigned URLs before rendering.
     };
   }
 
@@ -213,6 +227,16 @@ export class ReportService {
       throw new ForbiddenException('You can only view reports in your LGA');
     }
 
+    // ── COLLECTOR can only see reports assigned to them
+    if (user.role === UserRole.COLLECTOR && report.assignedCollectorId !== user.sub) {
+      throw new ForbiddenException('You can only view reports assigned to you');
+    }
+
+    // ── MEDIA PRESIGN CONTRACT
+    // mediaUrls and thumbnailUrl contain MinIO object keys (e.g. 'reports/userId/2026/01/uuid.webp').
+    // They are NEVER stored as presigned URLs to avoid stale-link issues at scale.
+    // The frontend must call: GET /api/media/presign?keys[]=key1&keys[]=key2
+    // to get fresh presigned URLs (15-min TTL) before rendering images.
     return report;
   }
 
@@ -238,11 +262,21 @@ export class ReportService {
       );
     }
 
+    const { mediaUrls, thumbnailUrl, ...contentFields } = dto;
+
     const updated = await this.prisma.wasteReport.update({
       where: { id: reportId },
       data: {
-        ...dto,
+        ...contentFields, // title, description, wasteType, severity, lat/lng, address, etc.
         updatedAt: new Date(),
+        // Only update media if provided AND validate that the keys belong to this user
+        ...(mediaUrls !== undefined && {
+          mediaUrls: mediaUrls.filter((key) => key.includes(`/${report.reporterAuthId}/`)),
+        }),
+        ...(thumbnailUrl !== undefined &&
+          thumbnailUrl.includes(`/${report.reporterAuthId}/`) && {
+            thumbnailUrl,
+          }),
       },
     });
 
@@ -351,6 +385,10 @@ export class ReportService {
     if (status) where.status = status;
     if (wasteType) where.wasteType = wasteType;
 
+    // ── Pagination guards
+    page = !Number.isInteger(page) || page < 1 ? 1 : page;
+    limit = !Number.isInteger(limit) || limit < 1 ? 20 : Math.min(limit, 100);
+
     const skip = (page - 1) * limit;
 
     const [data, total] = await Promise.all([
@@ -393,20 +431,28 @@ export class ReportService {
   // ADMIN — REVIEW REPORT (locks it from citizen edits)
   // ============================================================
   async reviewReport(actor: JwtPayload, reportId: string, dto: UpdateReportStatusDto) {
-    return this.changeStatus(actor, reportId, ReportStatus.UNDER_REVIEW, dto.note, [
-      UserRole.AGENCY_ADMIN,
-      UserRole.SYS_ADMIN,
-    ]);
+    return this.changeStatus(
+      actor,
+      reportId,
+      ReportStatus.UNDER_REVIEW,
+      dto.note,
+      [UserRole.AGENCY_ADMIN, UserRole.SYS_ADMIN],
+      [ReportStatus.PENDING],
+    );
   }
 
   // ============================================================
   // ADMIN — VERIFY REPORT
   // ============================================================
   async verifyReport(actor: JwtPayload, reportId: string, dto: UpdateReportStatusDto) {
-    const report = await this.changeStatus(actor, reportId, ReportStatus.VERIFIED, dto.note, [
-      UserRole.AGENCY_ADMIN,
-      UserRole.SYS_ADMIN,
-    ]);
+    const report = await this.changeStatus(
+      actor,
+      reportId,
+      ReportStatus.VERIFIED,
+      dto.note,
+      [UserRole.AGENCY_ADMIN, UserRole.SYS_ADMIN],
+      [ReportStatus.PENDING, ReportStatus.UNDER_REVIEW],
+    );
 
     // ── Fire NATS — notification-service will SMS the citizen
     this.natsClient.emit(NatsEvents.REPORT_VERIFIED, {
@@ -429,47 +475,25 @@ export class ReportService {
       throw new BadRequestException('Rejection reason is required');
     }
 
-    const report = await this.prisma.wasteReport.findUnique({
-      where: { id: reportId },
-    });
+    // ── Use changeStatus to leverage its guards (LGA, roles, status transitions)
+    const updated = await this.changeStatus(
+      actor,
+      reportId,
+      ReportStatus.REJECTED,
+      dto.note,
+      [UserRole.AGENCY_ADMIN, UserRole.SYS_ADMIN],
+      [ReportStatus.PENDING, ReportStatus.UNDER_REVIEW],
+    );
 
-    if (!report) throw new NotFoundException('Report not found');
-
-    // ── Only AGENCY_ADMIN and SYS_ADMIN can reject
-    this.enforceAdminLgaBoundary(actor, report.lgaId as LagosLGA);
-
-    // ── Report must be in PENDING or UNDER_REVIEW to be rejected
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const rejectedReport = await tx.wasteReport.update({
-        where: { id: reportId },
-        data: {
-          status: ReportStatus.REJECTED,
-          rejectedAt: new Date(),
-          rejectedById: actor.sub,
-          rejectionReason: dto.note,
-          lockedAt: report.lockedAt ?? new Date(),
-          lockedById: report.lockedById ?? actor.sub,
-        },
-      });
-
-      await tx.reportStatusHistory.create({
-        data: {
-          reportId: reportId,
-          fromStatus: report.status as ReportStatus,
-          toStatus: ReportStatus.REJECTED,
-          changedById: actor.sub,
-          changedByRole: actor.role,
-          note: dto.note,
-        },
-      });
-
-      return rejectedReport;
-    });
-
-    // ── Fire NATS — notification-service will SMS the citizen
+    // ── Additional rejection-specific logic (already handled by changeStatus but we update specific fields here)
+    // Actually, changeStatus is generic. Let's customize it to handle the extra rejection/verification fields.
+    // Wait, the original code had custom fields for rejection. I'll merge them into changeStatus or keep them here.
+    // I'll update changeStatus to be more flexible.
+    
+    // Fire NATS — notification-service will SMS the citizen
     this.natsClient.emit(NatsEvents.REPORT_REJECTED, {
-      reportId: report.id,
-      reporterAuthId: report.reporterAuthId,
+      reportId: updated.id,
+      reporterAuthId: updated.reporterAuthId,
       rejectionReason: dto.note,
       timestamp: new Date().toISOString(),
     });
@@ -583,9 +607,9 @@ export class ReportService {
     const basePoints = pointsConfig?.basePoints ?? 10;
 
     // ── Re-apply the same multipliers used at submission time
-    // 1. First-report-of-day bonus
-    const isFirstToday = await this.isFirstReportToday(report.reporterAuthId);
-    let multiplier = isFirstToday ? (pointsConfig?.firstReportOfDayMultiplier ?? 1.0) : 1.0;
+    // 1. First-report-of-day bonus (Read from persisted metadata)
+    const storedMetadata = (report.metadata as { multiplierApplied?: number }) ?? {};
+    let multiplier = storedMetadata.multiplierApplied ?? 1.0;
 
     // 2. Underserved LGA bonus — checked against config
     // (underservedLgaMultiplier > 1.0 means this LGA is flagged as underserved by admin)
@@ -863,11 +887,9 @@ export class ReportService {
     const key = `report_rate:${userId}`;
     const count = await this.redis.incr(key);
 
-    // Set expiry on first increment
-    if (count === 1) {
-      // First request — set 1 hour expiry
-      await this.redis.expire(key, 60 * 60);
-    }
+    // ── Set expiry on first increment atomically (Redis 7+ NX flag)
+    // NX = only set expiry if no expiry exists — prevents race conditions
+    await this.redis.call('EXPIRE', key, 60 * 60, 'NX');
 
     // Allow up to 10 reports per hour
     if (count > 10) {
@@ -886,12 +908,17 @@ export class ReportService {
     const latDelta = radiusMeters / 111000;
     const lngDelta = radiusMeters / (111000 * Math.cos((latitude * Math.PI) / 180));
 
+    // ── Only consider reports from the last 7 days to avoid "hotspot" false positives
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
     // Only consider reports that are not rejected or cancelled
     return this.prisma.wasteReport.findFirst({
       where: {
         lgaId,
         latitude: { gte: latitude - latDelta, lte: latitude + latDelta },
         longitude: { gte: longitude - lngDelta, lte: longitude + lngDelta },
+        createdAt: { gte: sevenDaysAgo },
         status: {
           notIn: [ReportStatus.REJECTED, ReportStatus.CANCELLED],
         },
@@ -899,15 +926,26 @@ export class ReportService {
     });
   }
 
-  // Checks if this is the user's first report of the day for multiplier purposes
   private async isFirstReportToday(userId: string): Promise<boolean> {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    // WAT (West Africa Time) is UTC+1 = 60 minutes ahead
+    const nowUtc = new Date();
+    const lagosOffsetMs = 60 * 60 * 1000;
+
+    // Get start of today in Lagos time, then convert back to UTC for DB query
+    // 1. Convert current UTC time to Lagos time
+    const lagosNow = new Date(nowUtc.getTime() + lagosOffsetMs);
+
+    // 2. Get the midnight of that day in Lagos time
+    const lagosStartOfDay = new Date(lagosNow);
+    lagosStartOfDay.setUTCHours(0, 0, 0, 0);
+
+    // 3. Convert that Lagos midnight back to UTC for the database query
+    const utcStartOfDay = new Date(lagosStartOfDay.getTime() - lagosOffsetMs);
 
     const existingToday = await this.prisma.wasteReport.findFirst({
       where: {
         reporterAuthId: userId,
-        createdAt: { gte: startOfDay },
+        createdAt: { gte: utcStartOfDay },
       },
     });
 
@@ -928,6 +966,7 @@ export class ReportService {
     newStatus: ReportStatus,
     note?: string,
     allowedRoles?: UserRole[],
+    allowedFromStatuses?: ReportStatus[],
   ) {
     if (allowedRoles && !allowedRoles.includes(actor.role)) {
       throw new ForbiddenException(`Role '${actor.role}' cannot perform this action`);
@@ -940,6 +979,14 @@ export class ReportService {
 
     if (!report) throw new NotFoundException('Report not found');
 
+    // ── Enforce status transition guard
+    if (allowedFromStatuses && !allowedFromStatuses.includes(report.status as ReportStatus)) {
+      throw new BadRequestException(
+        `Cannot change report status to '${newStatus}' from its current status of '${report.status}'. ` +
+          `Allowed starting statuses: ${allowedFromStatuses.join(', ')}`,
+      );
+    }
+
     // Enforce LGA boundary for AGENCY_ADMIN
     this.enforceAdminLgaBoundary(actor, report.lgaId as LagosLGA);
 
@@ -951,9 +998,14 @@ export class ReportService {
           status: newStatus,
           lockedAt: report.lockedAt ?? new Date(),
           lockedById: report.lockedById ?? actor.sub,
+          // Verification-specific fields
           verifiedAt: newStatus === ReportStatus.VERIFIED ? new Date() : undefined,
           verifiedById: newStatus === ReportStatus.VERIFIED ? actor.sub : undefined,
           verificationNote: newStatus === ReportStatus.VERIFIED ? note : undefined,
+          // Rejection-specific fields
+          rejectedAt: newStatus === ReportStatus.REJECTED ? new Date() : undefined,
+          rejectedById: newStatus === ReportStatus.REJECTED ? actor.sub : undefined,
+          rejectionReason: newStatus === ReportStatus.REJECTED ? note : undefined,
         },
       });
 
@@ -999,24 +1051,32 @@ export class ReportService {
       return;
     }
 
-    // Update all matching reports (usually just 1)
-    for (const report of reports) {
-      // Replace the old key with the new compressed key in the array
-      const updatedMediaUrls = report.mediaUrls.map((url) =>
-        url === data.originalKey ? data.compressedKey : url,
-      );
+    // Update all matching reports (usually just 1) in parallel
+    await Promise.all(
+      reports.map(async (report) => {
+        // Replace the old key with the new compressed key in the array
+        const updatedMediaUrls = report.mediaUrls.map((url) =>
+          url === data.originalKey ? data.compressedKey : url,
+        );
 
-      await this.prisma.wasteReport.update({
-        where: { id: report.id },
-        data: {
-          mediaUrls: updatedMediaUrls,
-          thumbnailUrl: data.thumbnailKey, // Set the generated thumbnail
-        },
-      });
+        // Only update the thumbnail if:
+        // (a) no thumbnail has been set yet, OR
+        // (b) the current thumbnail is still the original uncompressed key
+        const shouldUpdateThumbnail =
+          !report.thumbnailUrl || report.thumbnailUrl === data.originalKey;
 
-      this.logger.log(
-        `Updated Report ${report.id} media URL to compressed version and set thumbnail`,
-      );
-    }
+        await this.prisma.wasteReport.update({
+          where: { id: report.id },
+          data: {
+            mediaUrls: updatedMediaUrls,
+            ...(shouldUpdateThumbnail && { thumbnailUrl: data.thumbnailKey }),
+          },
+        });
+
+        this.logger.log(
+          `Updated Report ${report.id}: compressed media key stored${shouldUpdateThumbnail ? ', thumbnail updated' : ' (thumbnail preserved)'}`,
+        );
+      }),
+    );
   }
 }

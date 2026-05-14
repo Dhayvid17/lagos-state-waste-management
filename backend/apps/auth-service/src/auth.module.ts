@@ -6,17 +6,19 @@ import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TerminusModule } from '@nestjs/terminus';
+import { ScheduleModule } from '@nestjs/schedule';
 
-import authConfig from './config/auth.config.js';
-import { AuthController } from './auth.controller.js';
-import { AuthService } from './auth.service.js';
-import { User, UserSchema } from './schemas/user.schema.js';
-import { JwtAccessStrategy } from './strategies/jwt-access.strategy.js';
-import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy.js';
-import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import { TokenBlocklistService } from './blocklist/token-blocklist.service.js';
-import { RedisThrottlerStorage } from './throttler/redis-throttler.storage.js';
-import { AuthHealthController } from './health/health.controller.js';
+import authConfig from './config/auth.config';
+import { AuthController } from './auth.controller';
+import { AuthService } from './auth.service';
+import { User, UserSchema } from './schemas/user.schema';
+import { JwtAccessStrategy } from './strategies/jwt-access.strategy';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { TokenBlocklistService } from './blocklist/token-blocklist.service';
+import { RedisThrottlerStorage } from './throttler/redis-throttler.storage';
+import { AuthHealthController } from './health/health.controller';
+import { CleanupExpiredTokensTask } from './tasks/cleanup-expired-tokens.task';
+import Redis from 'ioredis';
 
 @Module({
   imports: [
@@ -26,6 +28,9 @@ import { AuthHealthController } from './health/health.controller.js';
       load: [authConfig],
       envFilePath: ['../.env.dev', '.env.dev', '.env'],
     }),
+
+    // Scheduling
+    ScheduleModule.forRoot(),
 
     // MongoDB
     MongooseModule.forRootAsync({
@@ -43,7 +48,7 @@ import { AuthHealthController } from './health/health.controller.js';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('auth.jwt.accessSecret'),
-        signOptions: { expiresIn: config.get<string>('auth.jwt.accessExpiry') },
+        signOptions: { expiresIn: config.get<any>('auth.jwt.accessExpiry') },
       }),
     }),
 
@@ -84,10 +89,27 @@ import { AuthHealthController } from './health/health.controller.js';
   providers: [
     AuthService,
     JwtAccessStrategy,
-    JwtRefreshStrategy,
     JwtAuthGuard,
     TokenBlocklistService,
+    CleanupExpiredTokensTask,
+    {
+      provide: 'REDIS_CLIENT',
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const client = new Redis({
+          host: config.get<string>('auth.redis.host'),
+          port: config.get<number>('auth.redis.port'),
+          password: config.get<string>('auth.redis.password'),
+          retryStrategy: (times) => Math.min(times * 500, 10000), // Infinite exponential backoff capped at 10s
+        });
+
+        client.on('connect', () => console.log('Auth Service: Redis connected successfully'));
+        client.on('error', (err) => console.error('Auth Service: Redis error:', err.message));
+
+        return client;
+      },
+    },
   ],
-  exports: [AuthService, JwtAuthGuard],
+  exports: [AuthService, JwtAuthGuard, 'REDIS_CLIENT'],
 })
 export class AuthModule {}
