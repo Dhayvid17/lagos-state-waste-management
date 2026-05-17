@@ -45,8 +45,8 @@ export class UserService {
     const profile = await this.prisma.userProfile.create({
       data: {
         authId: payload.authId,
-        firstName: null, // Scaffolding: user fills via profile completion
-        lastName: null, // Scaffolding: user fills via profile completion
+        firstName: payload.firstName,
+        lastName: payload.lastName,
         phoneNumber: payload.phoneNumber ?? null,
         metadata: { registeredAt: payload.timestamp },
       },

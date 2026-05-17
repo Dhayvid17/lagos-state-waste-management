@@ -1,0 +1,7 @@
+﻿{
+  "amountNgn": 500,
+  "bankCode": "044",
+  "accountNumber": "0690000031",
+  "provider": "FLUTTERWAVE",
+  "idempotencyKey": "withdraw_test_final_006"
+}

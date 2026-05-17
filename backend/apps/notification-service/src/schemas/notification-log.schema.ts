@@ -70,7 +70,7 @@ export class NotificationLog {
 
 export const NotificationLogSchema = SchemaFactory.createForClass(NotificationLog);
 
-NotificationLogSchema.index({ recipientAuthId: 1 });
+
 NotificationLogSchema.index({ channel: 1, status: 1 });
 NotificationLogSchema.index({ createdAt: -1 });
 NotificationLogSchema.index({ triggerEvent: 1 });

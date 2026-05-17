@@ -20,6 +20,14 @@ export class CreateProfileDto {
   @IsEnum(UserRole)
   role?: UserRole;
 
+  @IsString()
+  @IsNotEmpty()
+  firstName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  lastName!: string;
+
   @ApiPropertyOptional({ example: '+2348012345678' })
   @IsOptional()
   @IsString()

@@ -126,6 +126,8 @@ export class AuthService {
           email: user.email,
           role: user.role,
           phoneNumber: user.phoneNumber,
+          firstName: dto.firstName,
+          lastName: dto.lastName,
           // TODO: Send rawEmailToken in the NATS payload so the notification-service can generate the clickable link
           // emailVerificationToken: rawEmailToken,
         })

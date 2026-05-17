@@ -1,0 +1,216 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum PaymentProvider {
+  FLUTTERWAVE
+  PAYSTACK
+}
+
+enum TransactionType {
+  POINTS_CREDIT      // Points awarded for completing a report
+  WALLET_CREDIT      // Points redeemed → wallet balance topped up
+  WALLET_DEBIT       // Withdrawal request → balance reduced
+  WITHDRAWAL_FEE     // Platform fee deducted on withdrawal
+  REFUND             // Refund credited back to wallet
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+}
+
+enum WithdrawalStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+// ============================================================
+// WALLET
+// One wallet per user — balance calculated from ledger SUM
+// NEVER update balance column directly
+// ============================================================
+
+model Wallet {
+  id        String   @id @default(uuid())
+  authId    String   @unique  // Links to auth-service MongoDB userId
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Cached balance — updated ONLY by summing ledger
+  // This is a denormalized cache for fast reads
+  // Never write to this directly — use updateWalletBalance()
+  cachedBalanceKobo Int @default(0) // Balance in kobo (₦1 = 100 kobo)
+
+  // ── Lifetime stats
+  totalPointsEarned    Int @default(0)
+  totalAmountWithdrawn Int @default(0) // In kobo
+
+  // ── Relations
+  transactions WalletTransaction[]
+  withdrawals  WithdrawalRequest[]
+
+  @@index([authId])
+  @@map("wallets")
+}
+
+// ============================================================
+// WALLET TRANSACTION LEDGER
+// Append-only — never update or delete rows
+// Balance = SUM of all amountKobo for this wallet
+// ============================================================
+
+model WalletTransaction {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  walletId  String
+  wallet    Wallet   @relation(fields: [walletId], references: [id])
+
+  type      TransactionType
+  status    TransactionStatus @default(PENDING)
+
+  // ── Amount in kobo — positive = credit, negative = debit
+  amountKobo Int
+
+  // ── Points involved (for POINTS_CREDIT and WALLET_CREDIT)
+  pointsAmount Int? // How many points were converted
+
+  // ── Reference data
+  reference        String  @unique // Internal idempotency key
+  externalReference String? // Provider transaction ID (Flutterwave/Paystack)
+  provider          PaymentProvider?
+
+  // ── Context
+  description  String
+  reportId     String? // Which report triggered points credit
+  withdrawalId String? // Which withdrawal this debit belongs to
+
+  // ── Immutability enforcement
+  // These fields are set once and never changed
+  metadata Json @default("{}")
+
+  @@index([walletId])
+  @@index([reference])
+  @@index([externalReference])
+  @@index([reportId])
+  @@index([createdAt(sort: Desc)])
+  @@map("wallet_transactions")
+}
+
+// ============================================================
+// WITHDRAWAL REQUEST
+// Tracks bank transfer requests from wallet to bank account
+// ============================================================
+
+model WithdrawalRequest {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  walletId  String
+  wallet    Wallet   @relation(fields: [walletId], references: [id])
+
+  authId    String // Requester authId
+
+  // ── Amount breakdown
+  amountKobo     Int // Amount requested by user
+  feeKobo        Int // Platform fee (1.5%)
+  netAmountKobo  Int // Amount user actually receives
+
+  // ── Bank details (captured at time of request — never mutate)
+  bankCode       String
+  bankName       String
+  accountNumber  String
+  accountName    String // As verified by provider
+
+  // ── Provider
+  provider       PaymentProvider @default(FLUTTERWAVE)
+
+  // ── Status lifecycle
+  status         WithdrawalStatus @default(PENDING)
+
+  // ── Provider response data
+  providerReference  String? // Provider's transfer ID
+  providerResponse   Json?   // Full provider response for debugging
+
+  // ── Idempotency
+  idempotencyKey String @unique // Prevent duplicate withdrawals
+
+  // ── Audit
+  processedAt  DateTime?
+  failureReason String?
+  metadata     Json @default("{}")
+
+  @@index([walletId])
+  @@index([authId])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@index([createdAt(sort: Desc)])
+  @@map("withdrawal_requests")
+}
+
+// ============================================================
+// WEBHOOK EVENT LOG
+// Every incoming webhook stored before processing
+// Idempotency: if same webhookId fires twice, skip processing
+// ============================================================
+
+model WebhookEvent {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  provider      PaymentProvider
+  eventType     String   // e.g. "charge.completed", "transfer.success"
+  webhookId     String   @unique // Provider's unique event ID — idempotency key
+  rawPayload    Json     // Full webhook body stored for replay/debugging
+  processed     Boolean  @default(false)
+  processedAt   DateTime?
+  errorMessage  String?  // If processing failed
+
+  @@index([provider])
+  @@index([webhookId])
+  @@index([processed])
+  @@index([createdAt(sort: Desc)])
+  @@map("webhook_events")
+}
+
+// ============================================================
+// PAYMENT AUDIT LOG
+// Immutable record of every payment-related admin/system action
+// ============================================================
+
+model PaymentAuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  actorId   String   // authId of who performed the action (or 'system')
+  actorRole String
+  action    String   // e.g. 'WITHDRAWAL_APPROVED', 'POINTS_AWARDED'
+  targetId  String?  // walletId, withdrawalId, transactionId
+  targetType String? // 'WALLET', 'WITHDRAWAL', 'TRANSACTION'
+  ipAddress String?
+  userAgent String?
+  metadata  Json     @default("{}")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([targetId])
+  @@index([createdAt(sort: Desc)])
+  @@map("payment_audit_logs")
+}

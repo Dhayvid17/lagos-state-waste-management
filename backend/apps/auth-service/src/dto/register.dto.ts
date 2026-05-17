@@ -24,6 +24,16 @@ export class RegisterDto {
   @StrongPassword()
   password: string;
 
+  @ApiProperty({ example: 'John' })
+  @IsString()
+  @IsNotEmpty({ message: 'First name is required' })
+  firstName: string;
+
+  @ApiProperty({ example: 'Doe' })
+  @IsString()
+  @IsNotEmpty({ message: 'Last name is required' })
+  lastName: string;
+
   @ApiPropertyOptional({ example: '+2348012345678' })
   @IsOptional()
   @IsString()
