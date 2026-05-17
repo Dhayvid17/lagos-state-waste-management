@@ -14,7 +14,7 @@ import { MessagePattern, Payload } from '@nestjs/microservices';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
-import { CurrentUser, Public } from '@app/shared';
+import { CurrentUser, Public, Roles, UserRole, RolesGuard } from '@app/shared';
 
 import type { JwtPayload } from '@app/shared';
 
@@ -31,7 +31,7 @@ import {
 
 @ApiTags('Auth')
 @Controller('auth')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
@@ -42,6 +42,40 @@ export class AuthController {
   @ApiOperation({ summary: 'Register a new user' })
   async register(@Body() dto: RegisterDto, @Req() req: Request) {
     return this.authService.register(dto, req);
+  }
+
+  // ── POST auth/register/invited
+  @Public()
+  @Post('register/invited')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Register a user via invite token' })
+  async registerWithInvite(
+    @Body() dto: RegisterDto & { inviteToken: string },
+    @Req() req: Request,
+  ) {
+    return this.authService.registerWithInvite(dto, req);
+  }
+
+  // ── POST auth/admin/invite-token
+  @Post('admin/invite-token')
+  @Roles(UserRole.SYS_ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Generate an invite token (SYS_ADMIN only)' })
+  @ApiBearerAuth()
+  async generateInviteToken(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: { targetRole: UserRole; targetLgaId?: string },
+  ) {
+    return this.authService.generateInviteToken(user, dto.targetRole, dto.targetLgaId);
+  }
+
+  // ── GET auth/admin/invite-tokens
+  @Get('admin/invite-tokens')
+  @Roles(UserRole.SYS_ADMIN)
+  @ApiOperation({ summary: 'List active invite tokens (SYS_ADMIN only)' })
+  @ApiBearerAuth()
+  async getInviteTokens(@CurrentUser() user: JwtPayload) {
+    return this.authService.getInviteTokens(user);
   }
 
   // ── POST /auth/login

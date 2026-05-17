@@ -19,7 +19,7 @@ import { Request } from 'express';
 
 import { JwtPayload, NatsEvents, UserRole, UserStatus, ROLE_PERMISSIONS } from '@app/shared';
 
-import { User, UserDocument, DeviceRefreshToken } from './schemas/user.schema';
+import { User, UserDocument, DeviceRefreshToken, InviteToken, InviteTokenDocument } from './schemas/user.schema';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import {
@@ -39,6 +39,7 @@ export class AuthService {
 
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(InviteToken.name) private inviteTokenModel: Model<InviteTokenDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly tokenBlocklist: TokenBlocklistService,
@@ -146,6 +147,173 @@ export class AuthService {
       userId: String(user._id),
     };
   }
+
+  // ============================================================
+  // INVITE TOKEN SYSTEM
+  // ============================================================
+  
+  async generateInviteToken(actor: JwtPayload, targetRole: UserRole, targetLgaId?: string) {
+    if (actor.role !== UserRole.SYS_ADMIN) {
+      throw new ForbiddenException('Only SYS_ADMIN can generate invite tokens');
+    }
+
+    if (targetRole === UserRole.SYS_ADMIN) {
+      throw new ForbiddenException('Cannot generate invites for SYS_ADMIN. Use bootstrap script.');
+    }
+
+    if (targetRole === UserRole.AGENCY_ADMIN && !targetLgaId) {
+      throw new BadRequestException('lgaId is required when inviting an AGENCY_ADMIN');
+    }
+
+    // Generate secure random token
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    // Store hash in DB
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); // 72 hours
+    
+    await this.inviteTokenModel.create({
+      tokenHash,
+      targetRole,
+      targetLgaId,
+      createdByAuthId: actor.sub,
+      isUsed: false,
+      expiresAt,
+    });
+
+    const baseUrl = this.configService.get<string>('auth.frontendUrl') || 'http://localhost:3000';
+    
+    return {
+      inviteLink: `${baseUrl}/register?invite=${rawToken}`,
+      expiresAt,
+      targetRole,
+    };
+  }
+
+  async getInviteTokens(actor: JwtPayload) {
+    if (actor.role !== UserRole.SYS_ADMIN) {
+      throw new ForbiddenException('Only SYS_ADMIN can view invite tokens');
+    }
+
+    // Return pending invites (not used, not expired) without exposing hashes
+    return this.inviteTokenModel.find({
+      isUsed: false,
+      expiresAt: { $gt: new Date() },
+    }).select('-tokenHash -__v').exec();
+  }
+
+  async registerWithInvite(dto: RegisterDto & { inviteToken: string }, req: Request) {
+    if (!dto.ndpaConsent) {
+      throw new BadRequestException('You must accept the data privacy policy to create an account');
+    }
+
+    const existingUser = await this.userModel.findOne({
+      email: dto.email.toLowerCase().trim(),
+    });
+
+    if (existingUser) {
+      throw new ConflictException('An account with this email already exists');
+    }
+
+    // Verify invite token
+    const tokenHash = crypto.createHash('sha256').update(dto.inviteToken).digest('hex');
+
+    // Use findOneAndUpdate to atomically check and lock the token
+    const invite = await this.inviteTokenModel.findOneAndUpdate(
+      { 
+        tokenHash, 
+        isUsed: false,
+        expiresAt: { $gt: new Date() }
+      },
+      { isUsed: true }, // Mark as used immediately to prevent race conditions
+      { new: true }
+    );
+
+    if (!invite) {
+      throw new UnauthorizedException('Invalid or expired invite token');
+    }
+
+    // Create user
+    const rounds = this.configService.get<number>('auth.security.bcryptRounds')!;
+    const passwordHash = await bcrypt.hash(dto.password, rounds);
+
+    const emailVerificationToken = this.hashToken(crypto.randomBytes(32).toString('hex'));
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const role = invite.targetRole;
+    const permissions = [...ROLE_PERMISSIONS[role]];
+
+    const session = await this.userModel.db.startSession();
+    let user: any;
+
+    try {
+      session.startTransaction();
+      
+      const [createdUser] = await this.userModel.create(
+        [
+          {
+            email: dto.email.toLowerCase().trim(),
+            passwordHash,
+            phoneNumber: dto.phoneNumber,
+            role,
+            permissions,
+            lgaId: invite.targetLgaId, // Only set if AGENCY_ADMIN
+            emailVerificationToken,
+            emailVerificationExpires,
+            ndpaConsentGiven: true,
+            ndpaConsentTimestamp: new Date(),
+            ndpaConsentIp: req.ip,
+          },
+        ],
+        { session },
+      );
+      user = createdUser;
+
+      // Update the invite record to link the newly created user
+      await this.inviteTokenModel.updateOne(
+        { _id: invite._id },
+        { usedByAuthId: String(user._id) },
+        { session }
+      );
+
+      await session.commitTransaction();
+      this.logger.log(`New invited user registered in DB: ${user.email} [${role}]`);
+    } catch (error) {
+      await session.abortTransaction();
+      // If user creation fails, we should release the invite token lock
+      await this.inviteTokenModel.updateOne(
+        { _id: invite._id },
+        { isUsed: false }
+      );
+      if (error instanceof ConflictException) throw error;
+      throw new InternalServerErrorException('Registration failed. Please try again.');
+    } finally {
+      await session.endSession();
+    }
+
+    try {
+      await this.natsClient
+        .emit(NatsEvents.USER_CREATED, {
+          authId: String(user._id),
+          email: user.email,
+          role: user.role,
+          lgaId: user.lgaId,
+          phoneNumber: user.phoneNumber,
+          firstName: dto.firstName,
+          lastName: dto.lastName,
+        })
+        .toPromise();
+    } catch (natsError) {
+      this.logger.error(`NATS emit failed after invited user creation: ${(natsError as Error).message}`);
+    }
+
+    return {
+      message: 'Registration successful. Please verify your email.',
+      userId: String(user._id),
+      role: user.role,
+    };
+  }
+
 
   // ============================================================
   // LOGIN

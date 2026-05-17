@@ -216,3 +216,36 @@ UserSchema.set('toJSON', {
     return ret;
   },
 });
+
+// ============================================================
+// INVITE TOKEN SCHEMA
+// ============================================================
+
+export type InviteTokenDocument = InviteToken & Document;
+
+@Schema({ timestamps: true, collection: 'invite_tokens' })
+export class InviteToken {
+  @Prop({ required: true, index: true })
+  tokenHash: string;
+
+  @Prop({ required: true, enum: UserRole })
+  targetRole: UserRole;
+
+  @Prop()
+  targetLgaId?: string;
+
+  @Prop({ required: true })
+  createdByAuthId: string;
+
+  @Prop({ default: false })
+  isUsed: boolean;
+
+  @Prop()
+  usedByAuthId?: string;
+
+  @Prop({ required: true })
+  expiresAt: Date;
+}
+
+export const InviteTokenSchema = SchemaFactory.createForClass(InviteToken);
+InviteTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });

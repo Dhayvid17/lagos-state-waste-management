@@ -1,7 +1,7 @@
-import { Processor, Process, OnQueueFailed, OnQueueCompleted } from '@nestjs/bull';
+import { Processor, Process, OnQueueFailed, OnQueueCompleted, InjectQueue } from '@nestjs/bull';
 import { Inject, Logger } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
-import { Job } from 'bull';
+import { Job, Queue } from 'bull';
 import sharp from 'sharp';
 import * as path from 'path';
 import * as os from 'os';
@@ -15,6 +15,7 @@ import {
   CompressImageJobData,
   CompressVideoJobData,
   DeleteFileJobData,
+  ValidateUploadJobData,
 } from './media.queue.js';
 
 @Processor(MEDIA_QUEUE)
@@ -24,7 +25,67 @@ export class MediaProcessor {
   constructor(
     private readonly minioService: MinioService,
     @Inject('NATS_SERVICE') private readonly natsClient: ClientProxy,
+    @InjectQueue(MEDIA_QUEUE) private readonly mediaQueue: Queue,
   ) {}
+
+  // ============================================================
+  // VALIDATE UPLOAD (QUARANTINE PIPELINE)
+  // ============================================================
+  @Process(MediaJobs.VALIDATE_UPLOAD)
+  async validateUpload(job: Job<ValidateUploadJobData>) {
+    const { key, mimeType, mediaType, uploadedById, thumbnailKey } = job.data;
+    this.logger.log(`Validating quarantined upload: ${key}`);
+
+    try {
+      // 1. Download from quarantine for analysis
+      const buffer = await this.minioService.getFileBufferFromQuarantine(key);
+
+      // 2. Run validation checks
+      const validationResult = await this.runValidationChecks(buffer, mimeType, mediaType, key);
+
+      if (!validationResult.passed) {
+        // Reject the file
+        await this.minioService.rejectFromQuarantine(key, validationResult.reason);
+        
+        // Emit rejection event
+        this.natsClient.emit('media.rejected', {
+          key,
+          uploadedById,
+          reason: validationResult.reason,
+          timestamp: new Date().toISOString(),
+        });
+
+        this.logger.warn(`File rejected from quarantine: ${key} — ${validationResult.reason}`);
+        return { rejected: true, reason: validationResult.reason };
+      }
+
+      // 3. Promote to production bucket
+      await this.minioService.promoteFromQuarantine(key);
+
+      // 4. Queue compression job now that file is in production
+      if (mediaType === 'image') {
+        await this.mediaQueue.add(MediaJobs.COMPRESS_IMAGE, 
+          { key, thumbnailKey, uploadedById, mimeType },
+          { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, 
+            removeOnComplete: true, removeOnFail: false }
+        );
+      } else {
+        // For video, we don't have originalSizeMb here. We need to get it from quarantine buffer or stat.
+        const originalSizeMb = Math.round((buffer.length / (1024 * 1024)) * 100) / 100;
+        await this.mediaQueue.add(MediaJobs.COMPRESS_VIDEO,
+          { key, thumbnailKey, uploadedById, mimeType, originalSizeMb },
+          { attempts: 2, backoff: { type: 'fixed', delay: 30000 },
+            priority: 10, removeOnComplete: true, removeOnFail: false }
+        );
+      }
+
+      this.logger.log(`File passed quarantine validation: ${key}`);
+      return { passed: true };
+    } catch (error) {
+      this.logger.error(`Quarantine validation error for ${key}: ${(error as Error).message}`);
+      throw error; // BullMQ retries
+    }
+  }
 
   // ============================================================
   // COMPRESS IMAGE
@@ -199,6 +260,67 @@ export class MediaProcessor {
     }
   }
 
+
+  private async runValidationChecks(
+    buffer: Buffer,
+    mimeType: string,
+    mediaType: 'image' | 'video',
+    key: string,
+  ): Promise<{ passed: boolean; reason: string }> {
+  
+    // CHECK 1 — File size sanity (buffer should not be empty or suspiciously tiny)
+    if (buffer.length < 1024) {
+      return { passed: false, reason: 'File too small to be a valid media file' };
+    }
+  
+    // CHECK 2 — For images: use Sharp to detect if it is a valid decodable image
+    if (mediaType === 'image') {
+      try {
+        const metadata = await sharp(buffer).metadata();
+        
+        // Minimum dimensions — a real photo of waste should be at least 100x100
+        if (!metadata.width || !metadata.height || 
+            metadata.width < 100 || metadata.height < 100) {
+          return { passed: false, reason: 'Image dimensions too small — minimum 100x100 pixels' };
+        }
+  
+        // Maximum dimensions — reject absurdly large images (possible DoS)
+        if (metadata.width > 20000 || metadata.height > 20000) {
+          return { passed: false, reason: 'Image dimensions exceed maximum allowed size' };
+        }
+  
+      } catch (sharpError) {
+        return { passed: false, reason: 'File could not be decoded as a valid image' };
+      }
+    }
+  
+    // CHECK 3 — Scan for embedded scripts in image metadata (EXIF injection)
+    if (mediaType === 'image') {
+      try {
+        const metadata = await sharp(buffer).metadata();
+        const exifStr = JSON.stringify(metadata.exif ?? '');
+        
+        // Detect script injection patterns in EXIF data
+        const suspiciousPatterns = [
+          /<script/i, /javascript:/i, /eval\(/i, 
+          /document\.cookie/i, /fetch\(/i, /XMLHttpRequest/i
+        ];
+        
+        for (const pattern of suspiciousPatterns) {
+          if (pattern.test(exifStr)) {
+            return { passed: false, reason: 'Suspicious content detected in image metadata' };
+          }
+        }
+      } catch {
+        // If EXIF read fails, that is acceptable — continue
+      }
+    }
+  
+    // CHECK 4 is handled by compressImage with .withMetadata(false)
+  
+    // All checks passed
+    return { passed: true, reason: '' };
+  }
 
   // ============================================================
   // DELETE FILE

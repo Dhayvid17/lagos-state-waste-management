@@ -2,12 +2,22 @@
 export const MEDIA_QUEUE = 'media-processing';
 
 export const MediaJobs = {
+  VALIDATE_UPLOAD: 'validate-upload',
   COMPRESS_IMAGE: 'compress-image',
   COMPRESS_VIDEO: 'compress-video',
   DELETE_FILE: 'delete-file',
 } as const;
 
 // ── Job payload shapes
+export interface ValidateUploadJobData {
+  key: string;
+  thumbnailKey: string;
+  uploadedById: string;
+  mimeType: string;
+  mediaType: 'image' | 'video';
+  reportId?: string;
+}
+
 export interface CompressImageJobData {
   key: string;          // MinIO object key
   uploadedById: string; // authId of uploader

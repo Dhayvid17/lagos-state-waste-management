@@ -115,6 +115,31 @@ export class PaymentController {
     return this.walletService.getAllWallets(user, safePage, safeLimit);
   }
 
+  // ── POST /api/payments/admin/withdrawals/:id/approve
+  @Post('admin/withdrawals/:id/approve')
+  @Roles(UserRole.SYS_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Approve a flagged withdrawal — SYS_ADMIN only' })
+  approveFlaggedWithdrawal(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.walletService.approveFlaggedWithdrawal(user, id);
+  }
+
+  // ── POST /api/payments/admin/withdrawals/:id/reject
+  @Post('admin/withdrawals/:id/reject')
+  @Roles(UserRole.SYS_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Reject a flagged withdrawal — SYS_ADMIN only' })
+  rejectFlaggedWithdrawal(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: { reason: string },
+  ) {
+    return this.walletService.rejectFlaggedWithdrawal(user, id, dto.reason);
+  }
+
   // ============================================================
   // WEBHOOK ENDPOINTS
   // Both @Public() — security via HMAC signature only

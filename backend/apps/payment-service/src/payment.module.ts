@@ -21,6 +21,7 @@ import {
   PAYSTACK_PROVIDER,
 } from './interfaces/payment-provider.interface';
 import { WebhookRetryTask } from './tasks/webhook-retry.task';
+import { ReconciliationTask } from './tasks/reconciliation.task';
 
 @Module({
   imports: [
@@ -68,6 +69,7 @@ import { WebhookRetryTask } from './tasks/webhook-retry.task';
     FlutterwaveProvider,
     PaystackProvider,
     WebhookRetryTask,
+    ReconciliationTask,
 
     // ── Provider injection tokens — clean DI for interface pattern
     {

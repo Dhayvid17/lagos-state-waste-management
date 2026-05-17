@@ -9,23 +9,24 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   constructor() {
     const { Pool } = require('pg');
     const pool = new Pool({
-      connectionString: process.env.DATABASE_URL_USERS ?? process.env.DATABASE_URL,
-    });
-    pool.on('connect', (client: any) => {
-      client.query('SET search_path TO users, public;');
+      connectionString: process.env.DATABASE_URL_COLLECTOR ?? process.env.DATABASE_URL,
     });
 
-    const adapter = new PrismaPg(pool, { schema: 'users' });
+    pool.on('connect', (client: any) => {
+      client.query('SET search_path TO collector, public;');
+    });
+
+    const adapter = new PrismaPg(pool, { schema: 'collector' });
     super({ adapter });
   }
 
   async onModuleInit() {
     await this.$connect();
-    this.logger.log('✅ Postgres connected via Prisma');
+    this.logger.log('✅ Postgres connected — collector-service');
   }
 
   async onModuleDestroy() {
     await this.$disconnect();
-    this.logger.log('Prisma disconnected');
+    this.logger.log('Prisma disconnected — collector-service');
   }
 }

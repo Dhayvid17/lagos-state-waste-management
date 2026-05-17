@@ -1,0 +1,200 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum AssignmentStatus {
+  PENDING     // Assigned by admin, collector not yet started
+  ON_ROUTE    // Collector moving to waste location
+  COLLECTING  // Collector at site, collecting waste
+  COMPLETED   // Job done, triggered report.completed chain
+  CANCELLED   // Assignment cancelled (collector unavailable etc.)
+}
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+// ============================================================
+// COLLECTOR ASSIGNMENT
+// Created when admin fires report.assigned NATS event
+// One active assignment per collector at a time
+// ============================================================
+
+model CollectorAssignment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Core links
+  collectorAuthId String   // authId from auth-service
+  reportId        String   // reportId from report-service
+  lgaId           LagosLGA
+
+  // ── Who assigned
+  assignedByAuthId String
+  assignedAt       DateTime @default(now())
+
+  // ── Status lifecycle
+  status           AssignmentStatus @default(PENDING)
+
+  // ── Timing
+  startedAt        DateTime? // When collector set ON_ROUTE
+  arrivedAt        DateTime? // When collector set COLLECTING
+  completedAt      DateTime? // When collector set COMPLETED
+  cancelledAt      DateTime?
+  cancellationReason String?
+
+  // ── Location snapshot at assignment time
+  reportLatitude   Float
+  reportLongitude  Float
+  reportAddress    String?
+
+  // ── Collector notes on completion
+  completionNote   String?
+
+  // ── Citizen rating (set once, never changed)
+  citizenRating     Int?      // 1-5 stars
+  citizenComment    String?
+  ratedByAuthId     String?   // authId of citizen who rated
+  ratedAt           DateTime?
+
+  // ── Relations
+  locationPings    CollectorLocation[]
+
+  // ── Audit
+  metadata         Json @default("{}")
+
+  @@unique([collectorAuthId, reportId]) // One assignment per collector-report pair
+  @@index([collectorAuthId])
+  @@index([reportId])
+  @@index([status])
+  @@index([lgaId])
+  @@index([assignedAt(sort: Desc)])
+  @@map("collector_assignments")
+}
+
+// ============================================================
+// COLLECTOR LOCATION
+// Append-only GPS pings — NEVER update, only insert
+// Auto-deleted after 90 days (NDPA compliance)
+// Only recorded during ON_ROUTE or COLLECTING status
+// ============================================================
+
+model CollectorLocation {
+  id           String   @id @default(uuid())
+  createdAt    DateTime @default(now())
+
+  assignmentId String
+  assignment   CollectorAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  collectorAuthId String
+  latitude        Float
+  longitude       Float
+  accuracyMeters  Float?   // GPS accuracy in meters
+  speedKmh        Float?   // Speed at time of ping
+  headingDegrees  Float?   // Direction of travel
+
+  // ── For NDPA compliance deletion
+  // This field is indexed for the cleanup cron job
+  expiresAt    DateTime // createdAt + 90 days
+
+  @@index([assignmentId])
+  @@index([collectorAuthId])
+  @@index([createdAt(sort: Desc)])
+  @@index([expiresAt]) // Cron job uses this to find expired pings
+  @@map("collector_locations")
+}
+
+// ============================================================
+// COLLECTOR STATS
+// Lifetime statistics per collector — ONE row per collector
+// Updated after each job completion
+// ============================================================
+
+model CollectorStats {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  collectorAuthId  String @unique
+  lgaId            LagosLGA?
+
+  // ── Lifetime counters
+  totalAssignments  Int   @default(0)
+  totalCompleted    Int   @default(0)
+  totalCancelled    Int   @default(0)
+  totalDistanceKm   Float @default(0)
+
+  // ── Performance metrics
+  averageCompletionMinutes Float @default(0)
+  completionRate           Float @default(0) // 0.0 to 1.0
+
+  // ── Rating — average of citizen ratings on completed jobs
+  averageRating   Float @default(0)
+  totalRatings    Int   @default(0)
+
+  // ── Current status
+  isOnline        Boolean @default(false)
+  isAvailable     Boolean @default(true) // false when on active assignment
+  lastPingAt      DateTime?
+  lastKnownLat    Float?
+  lastKnownLng    Float?
+
+  @@index([lgaId])
+  @@index([isOnline])
+  @@index([isOnline, isAvailable, lgaId])
+  @@index([completionRate(sort: Desc)])
+  @@map("collector_stats")
+}
+
+// ============================================================
+// COLLECTOR AUDIT LOG
+// Immutable record of all assignment state changes
+// ============================================================
+
+model CollectorAuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  actorId       String
+  actorRole     String
+  action        String   // ASSIGNMENT_CREATED, STATUS_CHANGED, etc.
+  targetId      String?  // assignmentId
+  targetType    String?  // ASSIGNMENT, LOCATION, STATS
+  ipAddress     String?
+  userAgent     String?
+  metadata      Json     @default("{}")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
+  @@map("collector_audit_logs")
+}

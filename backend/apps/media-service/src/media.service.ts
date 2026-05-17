@@ -36,7 +36,7 @@ export interface UploadResult {
   sizeBytes: number;
   sizeMb: number;
   thumbnailKey?: string;
-  processing: boolean; // true if compression job queued
+  status: 'QUARANTINED' | 'PROCESSING';
 }
 
 @Injectable()
@@ -81,8 +81,8 @@ export class MediaService {
     const key = `${context}/${user.sub}/${datePath}/${uniqueId}${ext}`;
     const thumbnailKey = `${context}/${user.sub}/${datePath}/${uniqueId}-thumb.webp`;
 
-    // ── 3. Upload raw file to MinIO immediately
-    await this.minioService.uploadFile(key, file.buffer, file.mimetype, {
+    // ── 3. Upload raw file to MinIO Quarantine Bucket
+    await this.minioService.uploadToQuarantine(key, file.buffer, file.mimetype, {
       'x-uploaded-by': user.sub,
       'x-original-name': encodeURIComponent(file.originalname),
       'x-context': context,
@@ -90,39 +90,36 @@ export class MediaService {
     });
 
     // ── 4. Generate presigned URL for immediate use
+    // Note: since it's in quarantine, getting presigned URL might need to come from quarantine?
+    // Wait, the prompt says "Change UploadResult.processing to: status: 'QUARANTINED'. So client knows the file is pending validation"
+    // Does the client get a presigned URL immediately? Yes, but it will be broken if it points to main bucket.
+    // I should generate the presigned URL for the quarantine bucket so they can see the uploading preview, or wait until promoted.
+    // Actually, usually presignedUrls are generated dynamically later. 
+    // Wait, the original code generated presignedUrl from the main bucket. I'll just remove the presignedUrl from the response or keep it pointing to the expected final destination, and client will handle the 'QUARANTINED' state. 
+    // Since `this.minioService.getPresignedUrl` looks at the main bucket, I will keep it as is. It will be valid once promoted.
     const presignedUrl = await this.minioService.getPresignedUrl(key);
 
     const sizeMb = Math.round((file.size / (1024 * 1024)) * 100) / 100;
 
-    // ── 5. Queue background jobs
-    if (mediaType === 'image') {
-      // Queue image compression — thumbnail is generated INSIDE this job (no separate thumbnail job)
-      await this.mediaQueue.add(
-        MediaJobs.COMPRESS_IMAGE,
-        { key, uploadedById: user.sub, mimeType: file.mimetype, thumbnailKey },
-        {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false,
-        },
-      );
-    } else {
-      // Queue video compression — thumbnail is generated INSIDE this job (no separate thumbnail job)
-      await this.mediaQueue.add(
-        MediaJobs.COMPRESS_VIDEO,
-        { key, uploadedById: user.sub, mimeType: file.mimetype, originalSizeMb: sizeMb, thumbnailKey },
-        {
-          attempts: 2,
-          backoff: { type: 'fixed', delay: 30000 },
-          priority: 10,
-          removeOnComplete: true,
-          removeOnFail: false,
-        },
-      );
-    }
+    // ── 5. Queue VALIDATE_UPLOAD job instead of COMPRESS
+    await this.mediaQueue.add(
+      MediaJobs.VALIDATE_UPLOAD,
+      { 
+        key, 
+        thumbnailKey, 
+        uploadedById: user.sub, 
+        mimeType: file.mimetype, 
+        mediaType 
+      },
+      {
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 3000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    );
 
-    this.logger.log(`File uploaded: ${key} (${sizeMb}MB) by ${user.sub} — compression queued`);
+    this.logger.log(`File uploaded to quarantine: ${key} (${sizeMb}MB) by ${user.sub} — validation queued`);
 
     return {
       key,
@@ -132,7 +129,7 @@ export class MediaService {
       sizeBytes: file.size,
       sizeMb,
       thumbnailKey,
-      processing: true, // Compression running in background
+      status: 'QUARANTINED',
     };
   }
 

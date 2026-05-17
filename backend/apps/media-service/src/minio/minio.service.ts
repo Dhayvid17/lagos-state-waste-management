@@ -9,10 +9,12 @@ export class MinioService implements OnModuleInit {
   private readonly logger = new Logger(MinioService.name);
   private client: Minio.Client;
   private bucket: string;
+  private quarantineBucket: string;
   private presignExpiry: number;
 
   constructor(private readonly configService: ConfigService) {
     this.bucket = this.configService.get<string>('media.minio.bucket')!;
+    this.quarantineBucket = this.configService.get<string>('media.minio.quarantineBucket') ?? `${this.bucket}-quarantine`;
     this.presignExpiry = this.configService.get<number>('media.minio.presignExpiry')!;
 
     this.client = new Minio.Client({
@@ -33,38 +35,119 @@ export class MinioService implements OnModuleInit {
   // ============================================================
   private async ensureBucketExists() {
     try {
-      const exists = await this.client.bucketExists(this.bucket);
-
+      // Ensure Main Bucket
+      let exists = await this.client.bucketExists(this.bucket);
       if (!exists) {
         await this.client.makeBucket(this.bucket, 'us-east-1');
         this.logger.log(`✅ MinIO bucket created: ${this.bucket}`);
-
-        // ── Enforce private bucket policy — NO public access
-        const policy = {
-          Version: '2012-10-17',
-          Statement: [
-            {
-              Effect: 'Deny',
-              Principal: '*',
-              Action: ['s3:GetObject'],
-              Resource: [`arn:aws:s3:::${this.bucket}/*`],
-              Condition: {
-                StringNotEquals: {
-                  's3:signatureversion': 'AWS4-HMAC-SHA256',
-                },
-              },
-            },
-          ],
-        };
-
-        await this.client.setBucketPolicy(this.bucket, JSON.stringify(policy));
-        this.logger.log('🔒 Bucket policy set — private access only');
+        await this.applyPrivatePolicy(this.bucket);
       } else {
-        this.logger.log(`✅ MinIO bucket exists: ${this.bucket} — skipping policy update`);
+        this.logger.log(`✅ MinIO bucket exists: ${this.bucket}`);
+      }
+
+      // Ensure Quarantine Bucket
+      exists = await this.client.bucketExists(this.quarantineBucket);
+      if (!exists) {
+        await this.client.makeBucket(this.quarantineBucket, 'us-east-1');
+        this.logger.log(`✅ MinIO quarantine bucket created: ${this.quarantineBucket}`);
+        await this.applyPrivatePolicy(this.quarantineBucket);
+      } else {
+        this.logger.log(`✅ MinIO quarantine bucket exists: ${this.quarantineBucket}`);
       }
     } catch (error) {
-      this.logger.error('Failed to initialize MinIO bucket:', (error as Error).message);
+      this.logger.error('Failed to initialize MinIO buckets:', (error as Error).message);
       throw new InternalServerErrorException('Storage initialization failed');
+    }
+  }
+
+  private async applyPrivatePolicy(bucketName: string) {
+    const policy = {
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Effect: 'Deny',
+          Principal: '*',
+          Action: ['s3:GetObject'],
+          Resource: [`arn:aws:s3:::${bucketName}/*`],
+          Condition: {
+            StringNotEquals: {
+              's3:signatureversion': 'AWS4-HMAC-SHA256',
+            },
+          },
+        },
+      ],
+    };
+    await this.client.setBucketPolicy(bucketName, JSON.stringify(policy));
+    this.logger.log(`🔒 Bucket policy set — private access only for ${bucketName}`);
+  }
+
+  // ============================================================
+  // QUARANTINE LOGIC
+  // ============================================================
+  async uploadToQuarantine(
+    key: string,
+    buffer: Buffer,
+    mimeType: string,
+    metadata?: Record<string, string>,
+  ): Promise<string> {
+    try {
+      await this.client.putObject(this.quarantineBucket, key, buffer, buffer.length, {
+        'Content-Type': mimeType,
+        ...metadata,
+      });
+      this.logger.log(`Uploaded to quarantine: ${key} (${buffer.length} bytes)`);
+      return key;
+    } catch (error) {
+      this.logger.error(`Upload to quarantine failed for key ${key}:`, (error as Error).message);
+      throw new InternalServerErrorException('Quarantine file upload failed');
+    }
+  }
+
+  async promoteFromQuarantine(key: string): Promise<void> {
+    try {
+      // Copy object from quarantine bucket to main bucket
+      const conds = new Minio.CopyConditions();
+      await this.client.copyObject(this.bucket, key, `/${this.quarantineBucket}/${key}`, conds);
+      
+      // Delete from quarantine bucket
+      await this.client.removeObject(this.quarantineBucket, key);
+      this.logger.log(`Promoted file from quarantine to production: ${key}`);
+    } catch (error) {
+      this.logger.error(`Failed to promote file from quarantine: ${key}`, (error as Error).message);
+      throw new InternalServerErrorException('Failed to promote file');
+    }
+  }
+
+  async rejectFromQuarantine(key: string, reason: string): Promise<void> {
+    try {
+      // We can add metadata x-rejected-reason and copy it to a rejected/ prefix
+      const rejectedKey = `rejected/${key}`;
+      const conds = new Minio.CopyConditions();
+      
+      // Note: MinIO copyObject doesn't directly allow replacing metadata easily in the simple API without replace-metadata flag
+      // We will just copy it to rejected prefix and delete original
+      await this.client.copyObject(this.quarantineBucket, rejectedKey, `/${this.quarantineBucket}/${key}`, conds);
+      await this.client.removeObject(this.quarantineBucket, key);
+      
+      this.logger.warn(`Rejected file in quarantine moved to ${rejectedKey}. Reason: ${reason}`);
+    } catch (error) {
+      this.logger.error(`Failed to reject file in quarantine: ${key}`, (error as Error).message);
+    }
+  }
+
+  async getFileBufferFromQuarantine(key: string): Promise<Buffer> {
+    try {
+      const stream = await this.client.getObject(this.quarantineBucket, key);
+      const chunks: Buffer[] = [];
+
+      return new Promise((resolve, reject) => {
+        stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('error', reject);
+      });
+    } catch (error) {
+      this.logger.error(`Get buffer from quarantine failed for key ${key}:`, (error as Error).message);
+      throw new InternalServerErrorException('Failed to retrieve file from quarantine');
     }
   }
 

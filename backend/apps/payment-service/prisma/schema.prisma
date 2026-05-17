@@ -38,6 +38,7 @@ enum WithdrawalStatus {
   SUCCESS
   FAILED
   CANCELLED
+  FLAGGED_FOR_REVIEW
 }
 
 // ============================================================

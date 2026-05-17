@@ -11,7 +11,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import authConfig from './config/auth.config';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { User, UserSchema } from './schemas/user.schema';
+import { User, UserSchema, InviteToken, InviteTokenSchema } from './schemas/user.schema';
 import { JwtAccessStrategy } from './strategies/jwt-access.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { TokenBlocklistService } from './blocklist/token-blocklist.service';
@@ -41,7 +41,10 @@ import Redis from 'ioredis';
     }),
 
     // Register User model
-    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+    MongooseModule.forFeature([
+      { name: User.name, schema: UserSchema },
+      { name: InviteToken.name, schema: InviteTokenSchema },
+    ]),
 
     // JWT — async so we can use ConfigService
     JwtModule.registerAsync({

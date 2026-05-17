@@ -17,6 +17,7 @@ import type Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import type { PaymentProviderInterface } from '../interfaces/payment-provider.interface';
 import { FLUTTERWAVE_PROVIDER, PAYSTACK_PROVIDER } from '../interfaces/payment-provider.interface';
+import { WithdrawalStatus } from '../generated/prisma/enums';
 export interface RedeemPointsDto {
   pointsAmount: number; // How many points to convert to cash
   idempotencyKey: string;
@@ -244,11 +245,15 @@ export class WalletService {
     try {
       // ── Minimum/maximum check
       if (dto.amountNgn < this.minimumWithdrawalNgn) {
-        throw new BadRequestException(`Minimum withdrawal is â‚¦${this.minimumWithdrawalNgn}`);
+        throw new BadRequestException(`Minimum withdrawal is ₦${this.minimumWithdrawalNgn}`);
       }
       if (dto.amountNgn > this.maximumWithdrawalNgn) {
-        throw new BadRequestException(`Maximum withdrawal is â‚¦${this.maximumWithdrawalNgn}`);
+        throw new BadRequestException(`Maximum withdrawal is ₦${this.maximumWithdrawalNgn}`);
       }
+
+      // ── VELOCITY CHECKS (Redis — fast, before any DB work)
+      await this.enforceWithdrawalVelocityLimits(user.sub);
+
       const amountKobo = Math.floor(dto.amountNgn * 100);
       const feeKobo = Math.floor(amountKobo * (this.withdrawalFeePercent / 100));
       const netKobo = amountKobo - feeKobo;
@@ -277,6 +282,51 @@ export class WalletService {
         );
         const wallet = wallets[0];
         if (!wallet) throw new NotFoundException('Wallet not found');
+
+        // ── SUSPICIOUS AMOUNT DETECTION
+        const lifetimeTotal = wallet.totalAmountWithdrawn ?? 0;
+        if (lifetimeTotal > 0 && amountKobo > lifetimeTotal * 0.5) {
+          // Flag instead of processing — admin must review
+          const flaggedWithdrawal = await tx.withdrawalRequest.create({
+            data: {
+              walletId: wallet.id,
+              authId: user.sub,
+              amountKobo,
+              feeKobo,
+              netAmountKobo: netKobo,
+              bankCode: dto.bankCode,
+              bankName: verified.bankName,
+              accountNumber: dto.accountNumber,
+              accountName: verified.accountName,
+              provider: provider as any,
+              status: WithdrawalStatus.FLAGGED_FOR_REVIEW,
+              idempotencyKey: dto.idempotencyKey,
+              metadata: {
+                flagReason: 'Amount exceeds 50% of lifetime withdrawals',
+                lifetimeTotalKobo: lifetimeTotal,
+                requestedKobo: amountKobo,
+              } as any,
+            },
+          });
+          await tx.paymentAuditLog.create({
+            data: {
+              actorId: user.sub,
+              actorRole: user.role,
+              action: 'WITHDRAWAL_FLAGGED',
+              targetId: flaggedWithdrawal.id,
+              targetType: 'WITHDRAWAL',
+              metadata: { reason: 'suspicious_amount', amountKobo, lifetimeTotal } as any,
+            },
+          });
+          // Emit NATS alert for admin notification
+          this.natsClient.emit('payment.suspicious_withdrawal', {
+            authId: user.sub,
+            withdrawalId: flaggedWithdrawal.id,
+            amountNgn: dto.amountNgn,
+            timestamp: new Date().toISOString(),
+          });
+          return { __flagged: true, withdrawal: flaggedWithdrawal };
+        }
         // ── Daily limit check (Lagos timezone WAT = UTC+1)
         const nowUtc = new Date();
         const lagosOffsetMs = 60 * 60 * 1000;
@@ -383,7 +433,16 @@ export class WalletService {
           },
         });
         return withdrawal;
-      });
+      }) as any; // Union: flagged object or WithdrawalRequest
+
+      // ── Handle FLAGGED response before initiating transfer
+      if ((result as any).__flagged) {
+        return {
+          message: 'Your withdrawal is under review. You will be notified within 24 hours.',
+          withdrawalId: (result as any).withdrawal.id,
+          status: 'FLAGGED_FOR_REVIEW',
+        };
+      }
       // ── Initiate actual bank transfer OUTSIDE transaction
       // Rule: NATS emit() calls must NOT be inside DB transactions
       try {
@@ -398,6 +457,8 @@ export class WalletService {
           `withdrawal_${result.id}`,
           `Lagos Waste withdrawal - ${user.sub}`,
         );
+        // ── Transfer succeeded — clear the failure counter
+        await this.redis.del(`velocity:failed_withdrawals:${user.sub}`);
         // ── Update withdrawal with provider reference
         await this.prisma.withdrawalRequest.update({
           where: { id: result.id },
@@ -414,7 +475,9 @@ export class WalletService {
           data: { status: 'PROCESSING' },
         });
       } catch (error) {
-        // ── Transfer failed — reverse the debit
+        // ── Transfer failed — increment failure counter, then reverse the debit
+        await this.redis.incr(`velocity:failed_withdrawals:${user.sub}`);
+        await (this.redis as any).call('EXPIRE', `velocity:failed_withdrawals:${user.sub}`, 3600, 'NX');
         await this.reverseFailedWithdrawal(result.id, (error as Error).message);
         throw new BadRequestException(`Transfer initiation failed: ${(error as Error).message}`);
       }
@@ -504,6 +567,34 @@ export class WalletService {
       this.logger.warn(`Rate limit exceeded for bank verification: ${authId}`);
       throw new BadRequestException(
         'Too many bank account verification attempts. Please try again in an hour.',
+      );
+    }
+  }
+
+  private async enforceWithdrawalVelocityLimits(authId: string): Promise<void> {
+    // CHECK 1 — Consecutive failure lockout
+    const failures = await this.redis.get(`velocity:failed_withdrawals:${authId}`);
+    if (parseInt(failures ?? '0') >= 3) {
+      throw new BadRequestException(
+        'Withdrawal temporarily locked due to multiple failures. Try again in 1 hour or contact support.',
+      );
+    }
+
+    // CHECK 2 — Max 3 withdrawals per hour
+    const hourKey = `velocity:withdrawals_hour:${authId}`;
+    const hourCount = await this.redis.incr(hourKey);
+    await (this.redis as any).call('EXPIRE', hourKey, 3600, 'NX');
+    if (hourCount > 3) {
+      throw new BadRequestException('Maximum 3 withdrawals per hour. Try again later.');
+    }
+
+    // CHECK 3 — Max 5 withdrawals per day
+    const dayKey = `velocity:withdrawals_day:${authId}`;
+    const dayCount = await this.redis.incr(dayKey);
+    await (this.redis as any).call('EXPIRE', dayKey, 86400, 'NX');
+    if (dayCount > 5) {
+      throw new BadRequestException(
+        'Maximum 5 withdrawals per day. Contact support if you need more.',
       );
     }
   }
@@ -622,6 +713,128 @@ export class WalletService {
       reference,
     );
   }
+  // ============================================================
+  // ADMIN — APPROVE / REJECT FLAGGED WITHDRAWAL
+  // ============================================================
+  async approveFlaggedWithdrawal(adminUser: JwtPayload, withdrawalId: string) {
+    if (adminUser.role !== UserRole.SYS_ADMIN) {
+      throw new ForbiddenException('Only SYS_ADMIN can approve flagged withdrawals');
+    }
+
+    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: withdrawalId },
+    });
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (withdrawal.status !== WithdrawalStatus.FLAGGED_FOR_REVIEW) {
+      throw new BadRequestException(`Withdrawal is not in FLAGGED_FOR_REVIEW status. Current: ${withdrawal.status}`);
+    }
+
+    const provider = withdrawal.provider === 'PAYSTACK' ? this.paystack : this.flutterwave;
+
+    // Update to PROCESSING first
+    await this.prisma.withdrawalRequest.update({
+      where: { id: withdrawalId },
+      data: { status: 'PROCESSING', processedAt: new Date() },
+    });
+
+    // Debit wallet
+    await this.prisma.$transaction(async (tx) => {
+      await tx.walletTransaction.create({
+        data: {
+          walletId: withdrawal.walletId,
+          type: 'WALLET_DEBIT',
+          status: 'PROCESSING',
+          amountKobo: -withdrawal.amountKobo,
+          reference: `withdrawal_${withdrawal.id}`,
+          description: `Approved flagged withdrawal to ${withdrawal.accountName}`,
+          withdrawalId: withdrawal.id,
+          metadata: { approvedBy: adminUser.sub } as any,
+        },
+      });
+      await tx.wallet.update({
+        where: { id: withdrawal.walletId },
+        data: { cachedBalanceKobo: { decrement: withdrawal.amountKobo } },
+      });
+      await tx.paymentAuditLog.create({
+        data: {
+          actorId: adminUser.sub,
+          actorRole: adminUser.role,
+          action: 'WITHDRAWAL_APPROVED',
+          targetId: withdrawalId,
+          targetType: 'WITHDRAWAL',
+          metadata: { approvedBy: adminUser.sub, approvedAt: new Date().toISOString() } as any,
+        },
+      });
+    });
+
+    // Initiate transfer
+    try {
+      const transferResult = await provider.initiateTransfer(
+        withdrawal.netAmountKobo,
+        {
+          bankCode: withdrawal.bankCode,
+          accountNumber: withdrawal.accountNumber,
+          accountName: withdrawal.accountName ?? '',
+          bankName: withdrawal.bankName ?? '',
+        },
+        `withdrawal_${withdrawal.id}`,
+        `Approved flagged withdrawal - ${withdrawal.authId}`,
+      );
+      await this.prisma.withdrawalRequest.update({
+        where: { id: withdrawalId },
+        data: {
+          providerReference: transferResult.providerReference,
+          providerResponse: transferResult.providerResponse as any,
+        },
+      });
+    } catch (error) {
+      await this.reverseFailedWithdrawal(withdrawal.id, (error as Error).message);
+      throw new BadRequestException(`Transfer initiation failed: ${(error as Error).message}`);
+    }
+
+    return { message: 'Flagged withdrawal approved and transfer initiated', withdrawalId };
+  }
+
+  async rejectFlaggedWithdrawal(adminUser: JwtPayload, withdrawalId: string, reason: string) {
+    if (adminUser.role !== UserRole.SYS_ADMIN) {
+      throw new ForbiddenException('Only SYS_ADMIN can reject flagged withdrawals');
+    }
+
+    const withdrawal = await this.prisma.withdrawalRequest.findUnique({
+      where: { id: withdrawalId },
+    });
+    if (!withdrawal) throw new NotFoundException('Withdrawal not found');
+    if (withdrawal.status !== WithdrawalStatus.FLAGGED_FOR_REVIEW) {
+      throw new BadRequestException(`Withdrawal is not in FLAGGED_FOR_REVIEW status. Current: ${withdrawal.status}`);
+    }
+
+    await this.prisma.withdrawalRequest.update({
+      where: { id: withdrawalId },
+      data: { status: 'FAILED', failureReason: `Admin rejected: ${reason}` },
+    });
+
+    await this.prisma.paymentAuditLog.create({
+      data: {
+        actorId: adminUser.sub,
+        actorRole: adminUser.role,
+        action: 'WITHDRAWAL_REJECTED',
+        targetId: withdrawalId,
+        targetType: 'WITHDRAWAL',
+        metadata: { rejectedBy: adminUser.sub, reason } as any,
+      },
+    });
+
+    this.natsClient.emit('payment.withdrawal_rejected', {
+      authId: withdrawal.authId,
+      withdrawalId: withdrawal.id,
+      amountNgn: withdrawal.amountKobo / 100,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { message: 'Flagged withdrawal rejected and user notified', withdrawalId };
+  }
+
   // ============================================================
   // ADMIN — GET ALL WALLETS
   // ============================================================

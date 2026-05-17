@@ -64,7 +64,25 @@
         "tsConfigPath": "apps/payment-service/tsconfig.app.json"
       }
     },
-    "shared": {
+    "collector-service": {
+      "type": "application",
+      "root": "apps/collector-service",
+      "entryFile": "main",
+      "sourceRoot": "apps/collector-service/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/collector-service/tsconfig.app.json"
+      }
+    },
+    "feed-service": {
+      "type": "application",
+      "root": "apps/feed-service",
+      "entryFile": "main",
+      "sourceRoot": "apps/feed-service/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/feed-service/tsconfig.app.json"
+      }
+    },
+   "shared": {
       "type": "library",
       "root": "libs/shared",
       "entryFile": "index",
