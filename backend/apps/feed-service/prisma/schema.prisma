@@ -1,0 +1,165 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum FeedPostStatus {
+  ACTIVE    // PENDING, UNDER_REVIEW, VERIFIED, ASSIGNED — ranked normally
+  RESOLVED  // COMPLETED — de-ranked by 80%, shows green badge
+  ARCHIVED  // 30 days after COMPLETED — hidden from main feed, searchable
+  REMOVED   // SYS_ADMIN deleted — never shown anywhere
+}
+
+enum WasteType {
+  GENERAL
+  RECYCLABLE
+  ORGANIC
+  ELECTRONIC
+  HAZARDOUS
+  CONSTRUCTION
+}
+
+enum ReportSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ReportStatus {
+  PENDING
+  UNDER_REVIEW
+  VERIFIED
+  ASSIGNED
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+// ============================================================
+// FEED POST
+// Lightweight reference to a report — never duplicates report data
+// Status synced via NATS events from report-service
+// ============================================================
+
+model FeedPost {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Reference to report-service (never joined — microservice boundary)
+  reportId        String         @unique
+  reporterAuthId  String
+
+  // ── Denormalized fields for feed ranking WITHOUT hitting report-service
+  // These are set once on creation and updated via NATS events
+  lgaId           LagosLGA
+  wasteType       WasteType
+  severity        ReportSeverity
+  latitude        Float
+  longitude       Float
+  title           String
+  thumbnailKey    String?        // MinIO object key — never a full URL
+
+  // ── Status mirrors report status
+  reportStatus    ReportStatus   @default(PENDING)         // PENDING, UNDER_REVIEW, VERIFIED, etc.
+  feedStatus      FeedPostStatus @default(ACTIVE)
+
+  // ── Completion data (set when report.completed fires)
+  resolvedAt      DateTime?
+  beforeMediaKeys String[] @default([]) // MinIO keys
+  afterMediaKeys  String[] @default([])  // MinIO keys
+
+  // ── Auto-archive timestamp
+  archiveAfter    DateTime? // Set when resolvedAt is set + 30 days
+
+  // ── Engagement counters — cached from social-service
+  // Updated via NATS events — not the source of truth (social-service owns that)
+  upvoteCount  Int @default(0)
+  commentCount Int @default(0)
+  repostCount  Int @default(0)
+
+  // ── Ranking score — recalculated every 5 minutes by cron
+  rankScore        Float    @default(0)
+  rankScoreUpdatedAt DateTime?
+
+  // ── Collector ETA (updated via collector.location_updated event)
+  collectorEtaMinutes Int?
+  collectorEtaUpdatedAt DateTime?
+
+  // ── Citizen delete window (24 hours from creation, PENDING only)
+  citizenCanDeleteUntil DateTime // createdAt + 24 hours
+
+  // ── Soft delete tracking
+  removedAt     DateTime?
+  removedByAuthId String?
+  removalReason   String?
+
+  @@index([reportId])
+  @@index([reporterAuthId])
+  @@index([lgaId])
+  @@index([feedStatus])
+  @@index([wasteType])
+  @@index([severity])
+  @@index([rankScore(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([archiveAfter])   // Cron job uses this
+  @@index([feedStatus, archiveAfter])
+  @@index([lgaId, feedStatus, rankScore(sort: Desc)]) // Most common feed query
+  @@map("feed_posts")
+}
+
+// ============================================================
+// FEED AUDIT LOG
+// Every admin action on feed posts
+// ============================================================
+
+model FeedAuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  actorId    String
+  actorRole  String
+  action     String
+  targetId   String?
+  targetType String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json    @default("{}")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
+  @@map("feed_audit_logs")
+}
