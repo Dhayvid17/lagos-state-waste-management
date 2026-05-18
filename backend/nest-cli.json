@@ -100,6 +100,15 @@
         "tsConfigPath": "apps/analytics-service/tsconfig.app.json"
       }
     },
+    "rewards-service": {
+      "type": "application",
+      "root": "apps/rewards-service",
+      "entryFile": "main",
+      "sourceRoot": "apps/rewards-service/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/rewards-service/tsconfig.app.json"
+      }
+    },
    "shared": {
       "type": "library",
       "root": "libs/shared",

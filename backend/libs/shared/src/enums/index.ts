@@ -108,6 +108,9 @@ export enum NatsEvents {
   USER_CREATED = 'user.created',
   USER_BANNED = 'user.banned',
 
+  // KYC events
+  KYC_VERIFIED = 'kyc.verified',
+
   // Notification events
   SEND_SMS = 'notification.send_sms',
   SEND_EMAIL = 'notification.send_email',

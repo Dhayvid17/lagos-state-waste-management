@@ -1,0 +1,205 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum BadgeType {
+  // Report count badges
+  FIRST_REPORT       // First report submitted
+  ACTIVE_REPORTER    // 10 reports
+  WASTE_WARRIOR      // 50 reports
+  LAGOS_CHAMPION     // 100 reports
+  ELITE_REPORTER     // 500 reports
+
+  // Points badges
+  POINTS_COLLECTOR   // 100 points earned
+  POINTS_HUNTER      // 500 points earned
+  POINTS_MASTER      // 2000 points earned
+
+  // Special badges
+  HAZARD_HERO        // 5 hazardous reports
+  CRITICAL_RESPONDER // 3 critical severity reports
+  STREAK_7           // 7 day reporting streak
+  STREAK_30          // 30 day reporting streak
+  EARLY_ADOPTER      // Registered in first month of platform
+  VERIFIED_CITIZEN   // KYC verified
+}
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+// ============================================================
+// CITIZEN REWARDS PROFILE
+// One row per citizen — tracks lifetime stats for badge logic
+// ============================================================
+
+model CitizenRewardsProfile {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  authId    String   @unique
+
+  // ── Lifetime report counts
+  totalReports          Int @default(0)
+  totalCompletedReports Int @default(0)
+  hazardousReports      Int @default(0)
+  criticalReports       Int @default(0)
+
+  // ── Points lifetime
+  totalPointsEarned     Int @default(0)
+
+  // ── Streak tracking
+  currentStreakDays     Int       @default(0)
+  longestStreakDays     Int       @default(0)
+  lastReportDate        DateTime?
+  streakBrokenAt        DateTime?
+
+  // ── LGA for leaderboard scoping
+  lgaId     LagosLGA?
+
+  // ── Relations
+  badges    CitizenBadge[]
+  streakLog StreakLog[]
+
+  @@index([authId])
+  @@index([lgaId])
+  @@index([totalPointsEarned(sort: Desc)])
+  @@index([totalReports(sort: Desc)])
+  @@map("citizen_rewards_profiles")
+}
+
+// ============================================================
+// CITIZEN BADGE
+// Each badge awarded once per citizen — unique constraint
+// ============================================================
+
+model CitizenBadge {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+
+  profileId String
+  profile   CitizenRewardsProfile @relation(fields: [profileId], references:[id],onDelete:  Cascade)
+
+  badgeType  BadgeType
+  awardedAt  DateTime  @default(now())
+  metadata   Json      @default("{}")
+
+  @@unique([profileId, badgeType]) // Each badge awarded only once
+  @@index([profileId])
+  @@index([badgeType])
+  @@map("citizen_badges")
+}
+
+// ============================================================
+// STREAK LOG
+// Append-only record of each day a citizen reported
+// Used to verify streak claims and display history
+// ============================================================
+
+model StreakLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  profileId  String
+  profile    CitizenRewardsProfile @relation(fields: [profileId], references:[id], onDelete:  Cascade)
+
+  reportDate    DateTime // The date of the report (midnight UTC)
+  streakDay     Int      // Which day in the streak (1, 2, 3...)
+  bonusPoints   Int      @default(0)
+
+  @@unique([profileId, reportDate]) // One entry per day per citizen
+  @@index([profileId])
+  @@index([reportDate(sort: Desc)])
+  @@map("streak_logs")
+}
+
+// ============================================================
+// LGA LEADERBOARD SNAPSHOT
+// Weekly snapshot of top citizens per LGA
+// Pre-computed for fast reads — never query live
+// ============================================================
+
+model LgaLeaderboardSnapshot {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  weekStart   DateTime
+  lgaId       LagosLGA
+  rank        Int
+  authId      String
+  totalPoints Int
+  totalReports Int
+  badgeCount  Int
+
+  @@unique([weekStart, lgaId, rank])
+  @@index([weekStart(sort: Desc)])
+  @@index([lgaId])
+  @@index([authId])
+  @@map("lga_leaderboard_snapshots")
+}
+
+// ============================================================
+// PLATFORM LEADERBOARD SNAPSHOT
+// Top 100 citizens across all of Lagos
+// ============================================================
+
+model PlatformLeaderboardSnapshot {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  weekStart    DateTime
+  rank         Int
+  authId       String
+  totalPoints  Int
+  totalReports Int
+  badgeCount   Int
+  lgaId        LagosLGA?
+
+  @@unique([weekStart, rank])
+  @@index([weekStart(sort: Desc)])
+  @@index([authId])
+  @@map("platform_leaderboard_snapshots")
+}
+
+// ============================================================
+// PROCESSED REWARD EVENT
+// DB-level idempotency to prevent double-awarding
+// ============================================================
+
+model ProcessedRewardEvent {
+  reportId      String   @id       // Report ID is the idempotency key
+  processedAt   DateTime @default(now())
+  authId        String             // Who received the reward
+  pointsAwarded Int                // How many points were awarded
+
+  @@map("processed_reward_events")
+}
