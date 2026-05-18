@@ -658,6 +658,8 @@ export class ReportService {
       lgaId: report.lgaId,
       pointsAwarded: finalPoints,
       timestamp: new Date().toISOString(),
+      mediaKeys: report.mediaUrls,
+      completionMediaKeys: dto.completionMediaUrls ?? [],
     });
 
     this.logger.log(
@@ -1078,5 +1080,14 @@ export class ReportService {
         );
       }),
     );
+  }
+
+  // ============================================================
+  // GET REPORT DIRECTLY — Internal microservice helper
+  // ============================================================
+  async getReportDirectly(reportId: string) {
+    return this.prisma.wasteReport.findUnique({
+      where: { id: reportId },
+    });
   }
 }

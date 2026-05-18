@@ -12,6 +12,7 @@ import { PrismaService } from './prisma/prisma.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ReportHealthController } from './health/health.controller';
 import { MediaProcessedHandler } from './events/media-processed.handler';
+import { ReportQueryHandler } from './events/report-query.handler';
 
 @Module({
   imports: [
@@ -45,7 +46,12 @@ import { MediaProcessedHandler } from './events/media-processed.handler';
     ]),
     TerminusModule,
   ],
-  controllers: [ReportController, ReportHealthController, MediaProcessedHandler],
+  controllers: [
+    ReportController,
+    ReportHealthController,
+    MediaProcessedHandler,
+    ReportQueryHandler,
+  ],
   providers: [
     ReportService,
     PrismaService,

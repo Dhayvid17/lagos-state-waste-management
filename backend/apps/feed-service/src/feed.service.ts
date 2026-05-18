@@ -432,6 +432,7 @@ export class FeedService {
       this.natsClient.emit('feed.post_created', {
         feedPostId: post.id,
         reportId: payload.reportId,
+        reporterAuthId: post.reporterAuthId,
         lgaId: payload.lgaId,
         timestamp: now.toISOString(),
       });

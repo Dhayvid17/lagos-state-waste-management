@@ -1,0 +1,246 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum LagosLGA {
+  AGEGE
+  AJEROMI
+  ALIMOSHO
+  AMUWO_ODOFIN
+  APAPA
+  BADAGRY
+  EPE
+  ETI_OSA
+  IBEJU_LEKKI
+  IFAKO_IJAIYE
+  IKEJA
+  IKORODU
+  KOSOFE
+  LAGOS_ISLAND
+  LAGOS_MAINLAND
+  MUSHIN
+  OJO
+  OSHODI_ISOLO
+  SHOMOLU
+  SURULERE
+}
+
+enum WasteType {
+  GENERAL
+  RECYCLABLE
+  ORGANIC
+  ELECTRONIC
+  HAZARDOUS
+  CONSTRUCTION
+}
+
+enum ReportSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum EventType {
+  REPORT_CREATED
+  REPORT_VERIFIED
+  REPORT_ASSIGNED
+  REPORT_COMPLETED
+  REPORT_REJECTED
+  REPORT_CANCELLED
+  USER_REGISTERED
+  COLLECTOR_COMPLETED
+  POINTS_AWARDED
+  WITHDRAWAL_MADE
+}
+
+// ============================================================
+// RAW ANALYTICS EVENT
+// Append-only event log — never update or delete within retention
+// Every significant platform event stored here for aggregation
+// ============================================================
+
+model AnalyticsEvent {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+
+  eventType  EventType
+  lgaId      LagosLGA?
+  wasteType  WasteType?
+  severity   ReportSeverity?
+
+  // ── Actor references (never store PII)
+  reportId        String?
+  collectorAuthId String?
+  citizenAuthId   String?
+
+  // ── Numeric values for aggregation
+  pointsAmount    Int?
+  amountKobo      Int?
+
+  // ── Geo data for heatmap
+  latitude        Float?
+  longitude       Float?
+
+  // ── Flexible metadata
+  metadata        Json @default("{}")
+
+  // ── Retention — auto-delete after 1 year
+  expiresAt       DateTime
+
+  @@index([eventType])
+  @@index([lgaId])
+  @@index([wasteType])
+  @@index([reportId])
+  @@index([createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@index([lgaId, eventType, createdAt(sort: Desc)])
+  @@map("analytics_events")
+}
+
+// ============================================================
+// LGA DAILY AGGREGATE
+// Pre-computed daily stats per LGA
+// Recalculated nightly from raw events
+// Faster than querying raw events for dashboard
+// ============================================================
+
+model LgaDailyAggregate {
+  id        String   @id @default(uuid())
+  date      DateTime // Midnight UTC of the day
+  lgaId     LagosLGA
+
+  // ── Report counts
+  reportsCreated   Int @default(0)
+  reportsVerified  Int @default(0)
+  reportsCompleted Int @default(0)
+  reportsRejected  Int @default(0)
+  reportsCancelled Int @default(0)
+
+  // ── By waste type
+  generalCount      Int @default(0)
+  recyclableCount   Int @default(0)
+  organicCount      Int @default(0)
+  electronicCount   Int @default(0)
+  hazardousCount    Int @default(0)
+  constructionCount Int @default(0)
+
+  // ── By severity
+  lowCount      Int @default(0)
+  mediumCount   Int @default(0)
+  highCount     Int @default(0)
+  criticalCount Int @default(0)
+
+  // ── User metrics
+  newUsers          Int @default(0)
+  activeUsers       Int @default(0)
+  activeCollectors  Int @default(0)
+
+  // ── Points and financial
+  totalPointsAwarded  Int @default(0)
+  totalWithdrawalsNgn Int @default(0)
+
+  // ── Performance
+  avgResolutionHours Float @default(0)
+  completionRate     Float @default(0) // 0.0 to 1.0
+
+  @@unique([date, lgaId])
+  @@index([lgaId])
+  @@index([date(sort: Desc)])
+  @@map("lga_daily_aggregates")
+}
+
+// ============================================================
+// PLATFORM DAILY AGGREGATE
+// Lagos-wide totals — one row per day
+// ============================================================
+
+model PlatformDailyAggregate {
+  id        String   @id @default(uuid())
+  date      DateTime @unique
+
+  // ── Platform totals
+  totalReports      Int @default(0)
+  totalCompleted    Int @default(0)
+  totalUsers        Int @default(0)
+  totalCollectors   Int @default(0)
+  totalPointsAwarded Int @default(0)
+
+  // ── Growth metrics
+  newUsersToday     Int @default(0)
+  newReportsToday   Int @default(0)
+
+  // ── Financial
+  totalWithdrawalsNgn Int @default(0)
+
+  // ── Platform health
+  avgResponseTimeHours Float @default(0)
+  platformCompletionRate Float @default(0)
+
+  @@index([date(sort: Desc)])
+  @@map("platform_daily_aggregates")
+}
+
+// ============================================================
+// HEATMAP DATA POINT
+// Aggregated location data for waste density heatmap
+// Refreshed hourly — no PII, only grid coordinates
+// ============================================================
+
+model HeatmapPoint {
+  id        String   @id @default(uuid())
+  updatedAt DateTime @updatedAt
+
+  // ── Grid cell (rounded to 3 decimal places — ~100m precision)
+  // Rounding protects privacy while enabling heatmap display
+  latGrid   Float    // latitude rounded to 3dp
+  lngGrid   Float    // longitude rounded to 3dp
+  lgaId     LagosLGA
+
+  // ── Density metrics
+  reportCount    Int   @default(0)
+  activeCount    Int   @default(0) // PENDING + VERIFIED reports
+  resolvedCount  Int   @default(0) // COMPLETED reports
+  severity       Float @default(0) // Average severity score
+
+  @@unique([latGrid, lngGrid])
+  @@index([lgaId])
+  @@index([reportCount(sort: Desc)])
+  @@map("heatmap_points")
+}
+
+// ============================================================
+// LGA LEADERBOARD
+// Rankings of LGAs by performance
+// Refreshed daily
+// ============================================================
+
+model LgaLeaderboard {
+  id        String   @id @default(uuid())
+  updatedAt DateTime @updatedAt
+  weekStart DateTime // Start of the week this covers
+
+  lgaId     LagosLGA
+  rank      Int      // 1 = best
+
+  // ── Scoring components
+  completionRate     Float @default(0)
+  avgResolutionHours Float @default(0)
+  totalReports       Int   @default(0)
+  totalCompleted     Int   @default(0)
+  score              Float @default(0)
+
+  @@unique([weekStart, lgaId])
+  @@index([weekStart(sort: Desc)])
+  @@index([rank])
+  @@map("lga_leaderboard")
+}

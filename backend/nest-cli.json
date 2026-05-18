@@ -82,6 +82,24 @@
         "tsConfigPath": "apps/feed-service/tsconfig.app.json"
       }
     },
+    "social-service": {
+      "type": "application",
+      "root": "apps/social-service",
+      "entryFile": "main",
+      "sourceRoot": "apps/social-service/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/social-service/tsconfig.app.json"
+      }
+    },
+    "analytics-service": {
+      "type": "application",
+      "root": "apps/analytics-service",
+      "entryFile": "main",
+      "sourceRoot": "apps/analytics-service/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/analytics-service/tsconfig.app.json"
+      }
+    },
    "shared": {
       "type": "library",
       "root": "libs/shared",
