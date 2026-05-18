@@ -1,0 +1,173 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum ReportFlagReason {
+  SPAM
+  FAKE_REPORT
+  OFFENSIVE_CONTENT
+  DUPLICATE
+  OTHER
+}
+
+// ============================================================
+// UPVOTE
+// One upvote per citizen per report — enforced by unique constraint
+// Cannot upvote own report
+// Cannot upvote COMPLETED or ARCHIVED reports
+// ============================================================
+
+model Upvote {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  reportId       String
+  citizenAuthId  String  // Who upvoted
+
+  @@unique([reportId, citizenAuthId]) // One upvote per citizen per report
+  @@index([reportId])
+  @@index([citizenAuthId])
+  @@index([createdAt(sort: Desc)])
+  @@map("upvotes")
+}
+
+// ============================================================
+// COMMENT
+// Public comments on reports
+// No editing allowed — delete and repost only (audit integrity)
+// Reporter can delete comments on their own report
+// AGENCY_ADMIN/SYS_ADMIN can delete any comment
+// ============================================================
+
+model Comment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  reportId       String
+  authorAuthId   String   // Who commented
+  reporterAuthId String?  // Who owns the report (for delete permission check)
+
+  content        String   @db.VarChar(1000)
+
+  // ── Soft delete — never hard delete for audit integrity
+  isDeleted      Boolean  @default(false)
+  deletedAt      DateTime?
+  deletedByAuthId String?
+  deletedByRole   String?
+  deletionReason  String?
+
+  @@index([reportId])
+  @@index([authorAuthId])
+  @@index([reportId, isDeleted])
+  @@index([createdAt(sort: Desc)])
+  @@map("comments")
+}
+
+// ============================================================
+// REPOST
+// Citizen shares a report to increase visibility
+// One repost per citizen per report
+// ============================================================
+
+model Repost {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  reportId       String
+  citizenAuthId  String
+  note           String? @db.VarChar(280) // Optional note when reposting
+
+  @@unique([reportId, citizenAuthId]) // One repost per citizen per report
+  @@index([reportId])
+  @@index([citizenAuthId])
+  @@index([createdAt(sort: Desc)])
+  @@map("reposts")
+}
+
+// ============================================================
+// REPORT FLAG
+// Citizens can flag posts for admin moderation
+// Auto-escalates to admin queue when threshold reached
+// ============================================================
+
+model ReportFlag {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  reportId       String
+  flaggedByAuthId String
+  reason         ReportFlagReason
+  details        String?          @db.VarChar(500)
+  lgaId          String?          // Populated from report owner cache for AGENCY_ADMIN moderation scoping
+
+  // ── Resolution
+  resolved       Boolean   @default(false)
+  resolvedAt     DateTime?
+  resolvedByAuthId String?
+  resolution     String?
+
+  @@unique([reportId, flaggedByAuthId]) // One flag per citizen per report
+  @@index([reportId])
+  @@index([flaggedByAuthId])
+  @@index([resolved, lgaId, createdAt(sort: Desc)]) // ⚡ Compound index for optimal admin flag queueing
+  @@index([resolved])
+  @@index([lgaId])
+  @@index([createdAt(sort: Desc)])
+  @@map("report_flags")
+}
+
+// ============================================================
+// ENGAGEMENT COUNTER
+// One row per reportId — single source of truth for counts
+// Updated atomically after each upvote/comment/repost
+// Redis caches these for fast feed reads
+// ============================================================
+
+model EngagementCounter {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reportId     String @unique
+  upvoteCount  Int    @default(0)
+  commentCount Int    @default(0)
+  repostCount  Int    @default(0)
+  flagCount    Int    @default(0)
+
+  @@index([reportId])
+  @@index([upvoteCount(sort: Desc)])
+  @@map("engagement_counters")
+}
+
+// ============================================================
+// SOCIAL AUDIT LOG
+// Every moderation action — comment deletion, flag resolution
+// ============================================================
+
+model SocialAuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  actorId    String
+  actorRole  String
+  action     String
+  targetId   String?
+  targetType String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json    @default("{}")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
+  @@map("social_audit_logs")
+}
